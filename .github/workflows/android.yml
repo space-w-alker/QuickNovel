@@ -29,6 +29,9 @@ jobs:
     needs: validate-wrapper
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Packaging both variants can exhaust the project's 2 GiB local daemon limit.
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g
 
     steps:
       - name: Check out repository
