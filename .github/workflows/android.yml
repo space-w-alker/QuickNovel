@@ -53,6 +53,9 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
+        with:
+          # Same-repository branches populate their scoped cache. Fork PRs stay read-only.
+          cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
 
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest --stacktrace
