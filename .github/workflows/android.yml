@@ -46,7 +46,8 @@ jobs:
       - name: Install Android API 37 preview SDK
         run: |
           sdkmanager --channel=3 "cmdline-tools;latest"
-          sdkmanager --channel=3 "platform-tools" "platforms;android-37" "build-tools;37.0.0"
+          "${ANDROID_SDK_ROOT}/cmdline-tools/latest-2/bin/sdkmanager" --channel=3 \
+            "platform-tools" "platforms;android-37" "build-tools;37.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
