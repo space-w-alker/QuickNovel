@@ -416,6 +416,7 @@ object TTSHelper {
     )
 
     enum class TTSStatus {
+        Preparing,
         IsRunning,
         IsPaused,
         IsStopped,
@@ -732,5 +733,62 @@ object TTSHelper {
         }
 
         return ttsLines
+    }
+}
+
+enum class TtsEngine(val preferenceValue: String) {
+    Device("device"),
+    Cloud("cloud");
+
+    companion object {
+        fun fromPreference(value: String): TtsEngine = entries.firstOrNull {
+            it.preferenceValue == value
+        } ?: Device
+    }
+}
+
+enum class TtsPlaybackResult { Completed, Interrupted }
+
+/** Engine-neutral reader playback. A line remains the unit of speech and highlighting. */
+interface ReaderTtsEngine {
+    val isInitialized: Boolean
+    fun register()
+    fun unregister()
+    fun setSpeed(speed: Float)
+    fun setPitch(pitch: Float)
+    fun pause()
+    fun resume()
+    fun interrupt()
+    fun release()
+
+    suspend fun play(
+        line: TTSHelper.TTSLine,
+        upcoming: List<TTSHelper.TTSLine>,
+        shouldCancel: () -> Boolean,
+    ): TtsPlaybackResult
+}
+
+/** Keeps the original Android TextToSpeech implementation and queueing behavior intact. */
+class DeviceTtsEngine(private val session: TTSSession) : ReaderTtsEngine {
+    override val isInitialized: Boolean get() = session.ttsInitialized()
+    override fun register() = session.register()
+    override fun unregister() = session.unregister()
+    override fun setSpeed(speed: Float) = session.setSpeed(speed)
+    override fun setPitch(pitch: Float) = session.setPitch(pitch)
+    override fun pause() = Unit // The existing loop interrupts and resumes the current sentence.
+    override fun resume() = Unit
+    override fun interrupt() = session.interruptTTS()
+    override fun release() = session.release()
+
+    override suspend fun play(
+        line: TTSHelper.TTSLine,
+        upcoming: List<TTSHelper.TTSLine>,
+        shouldCancel: () -> Boolean,
+    ): TtsPlaybackResult {
+        val id = session.speak(line, upcoming.firstOrNull(), shouldCancel)
+        if (!session.isValidTTS()) return TtsPlaybackResult.Interrupted
+        var interrupted = false
+        session.waitForOr(id, shouldCancel) { interrupted = true }
+        return if (interrupted) TtsPlaybackResult.Interrupted else TtsPlaybackResult.Completed
     }
 }

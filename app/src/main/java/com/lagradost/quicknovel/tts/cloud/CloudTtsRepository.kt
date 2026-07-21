@@ -1,0 +1,149 @@
+package com.lagradost.quicknovel.tts.cloud
+
+import android.content.Context
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
+import com.fasterxml.jackson.module.kotlin.readValue
+import com.lagradost.quicknovel.BuildConfig
+import com.lagradost.quicknovel.CLOUD_TTS_INSTALLATION_ID
+import com.lagradost.quicknovel.CLOUD_TTS_REFRESH_CREDENTIAL
+import com.lagradost.quicknovel.DataStore
+import com.lagradost.quicknovel.DataStore.getKey
+import com.lagradost.quicknovel.DataStore.setKey
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.io.IOException
+import java.util.UUID
+import kotlin.coroutines.coroutineContext
+import kotlin.random.Random
+
+class CloudTtsRepository(
+    context: Context,
+    private val api: CloudTtsApi = CloudTtsApi(),
+) {
+    private val appContext = context.applicationContext
+    private val mapper = DataStore.mapper
+    private val authMutex = Mutex()
+    @Volatile private var accessToken: String? = null
+
+    private val securePreferences by lazy {
+        val key = MasterKey.Builder(appContext)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        EncryptedSharedPreferences.create(
+            appContext,
+            "cloud_tts_credentials",
+            key,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        )
+    }
+
+    private val installationId: String by lazy {
+        appContext.getKey<String>(CLOUD_TTS_INSTALLATION_ID) ?: UUID.randomUUID().toString().also {
+            appContext.setKey(CLOUD_TTS_INSTALLATION_ID, it)
+        }
+    }
+
+    suspend fun catalog(): CloudCatalog = authenticated { token ->
+        parseSuccess(api.get("/v1/tts/catalog", token))
+    }
+
+    suspend fun resolve(
+        modelId: String,
+        voiceId: String,
+        text: String,
+    ): ResolveResult = authenticated { token ->
+        val request = ResolveChunkRequest(modelId, voiceId, text)
+        var result: ResolveResult = parseSuccess(
+            api.post("/v1/tts/chunks:resolve", mapper.writeValueAsString(request), token)
+        )
+        while (result.state == "generating") {
+            coroutineContext.ensureActive()
+            val jobId = result.jobId ?: throw CloudTtsException(
+                "generation_failed", "Cloud TTS returned an invalid generation job."
+            )
+            val baseDelay = result.retryAfterMs ?: 750L
+            delay((baseDelay + Random.nextLong(0, (baseDelay / 5).coerceAtLeast(1))).coerceAtMost(10_000))
+            result = authenticated { refreshedToken ->
+                parseSuccess(api.get("/v1/tts/jobs/$jobId", refreshedToken))
+            }
+        }
+        if (result.state != "ready" || result.audio == null) {
+            throw CloudTtsException("generation_failed", "Cloud TTS audio was not available.")
+        }
+        result
+    }
+
+    suspend fun download(url: String): ByteArray = networkCall {
+        val response = api.download(url)
+        if (response.status !in 200..299) {
+            throw CloudTtsException(
+                "signed_url_expired",
+                "Cloud TTS audio link expired before it could be downloaded.",
+                retryable = true,
+            )
+        }
+        response.body
+    }
+
+    private suspend fun token(forceRefresh: Boolean = false): String = authMutex.withLock {
+        if (!forceRefresh) accessToken?.let { return@withLock it }
+        val refreshToken = securePreferences.getString(CLOUD_TTS_REFRESH_CREDENTIAL, null)
+        val response = if (refreshToken == null) {
+            api.post(
+                "/v1/installations",
+                mapper.writeValueAsString(InstallationRequest(installationId, BuildConfig.VERSION_NAME)),
+            )
+        } else {
+            api.post(
+                "/v1/installations/token",
+                mapper.writeValueAsString(TokenRequest(installationId, refreshToken)),
+            )
+        }
+        val credentials: InstallationToken = parseSuccess(response)
+        credentials.refreshToken?.let {
+            securePreferences.edit().putString(CLOUD_TTS_REFRESH_CREDENTIAL, it).apply()
+        }
+        credentials.accessToken.also { accessToken = it }
+    }
+
+    private suspend fun <T> authenticated(block: suspend (String) -> T): T = networkCall {
+        try {
+            block(token())
+        } catch (error: CloudTtsException) {
+            if (error.code != "unauthorized") throw error
+            accessToken = null
+            block(token(forceRefresh = true))
+        }
+    }
+
+    private suspend fun <T> networkCall(block: suspend () -> T): T = withContext(Dispatchers.IO) {
+        try {
+            block()
+        } catch (error: CloudTtsException) {
+            throw error
+        } catch (error: IOException) {
+            throw CloudTtsException(
+                "network_failure",
+                "Cloud TTS needs an internet connection. Check your connection and try again.",
+                retryable = true,
+                cause = error,
+            )
+        }
+    }
+
+    private inline fun <reified T> parseSuccess(response: CloudTtsApi.Response): T {
+        if (response.status in 200..299) return mapper.readValue(response.body)
+        val apiError = runCatching { mapper.readValue<ApiErrorEnvelope>(response.body).error }.getOrNull()
+        throw CloudTtsException(
+            apiError?.code ?: "http_${response.status}",
+            apiError?.message ?: "Cloud TTS request failed. Please try again.",
+            apiError?.retryable ?: response.status >= 500,
+        )
+    }
+}

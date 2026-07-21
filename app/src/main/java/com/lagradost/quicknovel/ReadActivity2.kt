@@ -688,6 +688,27 @@ class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
             .toFloat() * this.stepSize
     }
 
+    private fun showCloudTtsConsent(onGranted: (() -> Unit)? = null) {
+        AlertDialog.Builder(this, R.style.AlertDialogCustom)
+            .setTitle(R.string.cloud_tts_consent_title)
+            .setMessage(R.string.cloud_tts_consent_message)
+            .setPositiveButton(R.string.cloud_tts_agree) { _, _ ->
+                viewModel.grantCloudTtsConsent()
+                onGranted?.invoke()
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun showCloudTtsError(message: String) {
+        AlertDialog.Builder(this, R.style.AlertDialogCustom)
+            .setTitle(R.string.cloud_tts_error_title)
+            .setMessage(message)
+            .setPositiveButton(R.string.cloud_tts_use_device) { _, _ -> viewModel.useDeviceTts() }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
 
     @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -700,6 +721,8 @@ class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
         registerBattery()
 
         viewModel.init(intent, this)
+        viewModel.cloudTtsError += { message -> runOnUiThread { showCloudTtsError(message) } }
+        viewModel.cloudTtsConsentRequired += { runOnUiThread { showCloudTtsConsent() } }
         topBarHeight = binding.readToolbarHolder.minimumHeight + getStatusBarHeight()
         binding.readToolbarHolder.minimumHeight = topBarHeight
         textAdapter = TextAdapter(
@@ -917,6 +940,7 @@ class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
             binding.readerBottomViewTts.isVisible = isTTSRunning
             binding.ttsActionPausePlay.setImageResource(
                 when (status) {
+                    TTSHelper.TTSStatus.Preparing -> R.drawable.ic_baseline_pause_24
                     TTSHelper.TTSStatus.IsPaused -> R.drawable.ic_baseline_play_arrow_24
                     TTSHelper.TTSStatus.IsRunning -> R.drawable.ic_baseline_pause_24
                     TTSHelper.TTSStatus.IsStopped -> R.drawable.ic_baseline_play_arrow_24
@@ -1149,6 +1173,95 @@ class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
                 binding.readSettingsTabs.addTab(binding.readSettingsTabs.newTab().setText(resId))
                 view.isVisible = index == 0
             }
+
+            fun updateCloudSettings() {
+                val cloud = viewModel.ttsEngine == TtsEngine.Cloud
+                binding.readTtsEngine.setText(
+                    if (cloud) R.string.tts_engine_cloud else R.string.tts_engine_device
+                )
+                binding.readCloudTtsSettings.isVisible = cloud
+                binding.readLanguage.isVisible = !cloud
+                binding.readVoice.isVisible = !cloud
+                binding.readSettingsTtsPitchText.isVisible = !cloud
+                binding.readSettingsTtsPitchContainer.isVisible = !cloud
+
+                if (cloud) {
+                    viewModel.loadCloudTtsCatalog { catalog ->
+                        val model = catalog.models.firstOrNull { it.id == viewModel.cloudTtsModelId }
+                        binding.readCloudTtsModel.isEnabled = catalog.models.size > 1
+                        binding.readCloudTtsModel.text = model?.displayName
+                            ?: getString(R.string.cloud_tts_model_loading)
+                        binding.readCloudTtsVoice.text = model?.voices
+                            ?.firstOrNull { it.id == viewModel.cloudTtsVoiceId }?.displayName
+                            ?: getString(R.string.cloud_tts_voice)
+                    }
+                }
+            }
+
+            binding.readTtsEngine.setOnClickListener {
+                val choices = listOf(
+                    getString(R.string.tts_engine_device),
+                    getString(R.string.tts_engine_cloud),
+                )
+                this.showDialog(
+                    choices,
+                    if (viewModel.ttsEngine == TtsEngine.Cloud) 1 else 0,
+                    getString(R.string.tts_engine),
+                    false,
+                    {},
+                ) { selected ->
+                    if (selected == 0) {
+                        viewModel.useDeviceTts()
+                        updateCloudSettings()
+                    } else if (viewModel.cloudTtsConsentVersion < ReadActivityViewModel.CLOUD_TTS_CONSENT_VERSION) {
+                        showCloudTtsConsent(::updateCloudSettings)
+                    } else {
+                        viewModel.ttsEngine = TtsEngine.Cloud
+                        updateCloudSettings()
+                    }
+                }
+            }
+
+            binding.readCloudTtsVoice.setOnClickListener {
+                viewModel.loadCloudTtsCatalog { catalog ->
+                    val model = catalog.models.firstOrNull { it.id == viewModel.cloudTtsModelId }
+                        ?: return@loadCloudTtsCatalog
+                    this.showDialog(
+                        model.voices.map { it.displayName },
+                        model.voices.indexOfFirst { it.id == viewModel.cloudTtsVoiceId },
+                        getString(R.string.cloud_tts_voice),
+                        false,
+                        {},
+                    ) { selected ->
+                        model.voices.getOrNull(selected)?.let { voice ->
+                            viewModel.cloudTtsVoiceId = voice.id
+                            binding.readCloudTtsVoice.text = voice.displayName
+                        }
+                    }
+                }
+            }
+
+            binding.readCloudTtsModel.setOnClickListener {
+                viewModel.loadCloudTtsCatalog { catalog ->
+                    if (catalog.models.size <= 1) return@loadCloudTtsCatalog
+                    this.showDialog(
+                        catalog.models.map { it.displayName },
+                        catalog.models.indexOfFirst { it.id == viewModel.cloudTtsModelId },
+                        getString(R.string.tts_engine_cloud),
+                        false,
+                        {},
+                    ) { selected ->
+                        catalog.models.getOrNull(selected)?.let { model ->
+                            viewModel.cloudTtsModelId = model.id
+                            viewModel.cloudTtsVoiceId = model.voices.firstOrNull()?.id.orEmpty()
+                            binding.readCloudTtsModel.text = model.displayName
+                            binding.readCloudTtsVoice.text = model.voices.firstOrNull()?.displayName
+                                ?: getString(R.string.cloud_tts_voice)
+                        }
+                    }
+                }
+            }
+            updateCloudSettings()
 
             // Show specific tab
             binding.readSettingsTabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {

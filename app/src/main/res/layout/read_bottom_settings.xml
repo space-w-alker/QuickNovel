@@ -200,6 +200,37 @@
                     android:text="@string/tts_voice_title"
                     android:textSize="16sp" />
 
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/read_tts_engine"
+                    style="@style/BlackButton"
+                    android:layout_width="match_parent"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/tts_engine_device"
+                    app:icon="@drawable/ic_baseline_volume_up_24" />
+
+                <LinearLayout
+                    android:id="@+id/read_cloud_tts_settings"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/read_cloud_tts_model"
+                        style="@style/BlackButton"
+                        android:layout_width="match_parent"
+                        android:layout_marginTop="10dp"
+                        android:enabled="false"
+                        android:text="@string/cloud_tts_model_loading" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/read_cloud_tts_voice"
+                        style="@style/BlackButton"
+                        android:layout_width="match_parent"
+                        android:layout_marginTop="10dp"
+                        android:text="@string/cloud_tts_voice" />
+                </LinearLayout>
+
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -240,6 +271,7 @@
                     android:textSize="16sp" />
 
                 <androidx.constraintlayout.widget.ConstraintLayout
+                    android:id="@+id/read_settings_tts_speed_container"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="15dp">
@@ -287,6 +319,7 @@
                     android:textSize="16sp" />
 
                 <androidx.constraintlayout.widget.ConstraintLayout
+                    android:id="@+id/read_settings_tts_pitch_container"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="15dp">
