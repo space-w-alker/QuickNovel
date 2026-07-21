@@ -7,8 +7,8 @@ apply plugin: 'kotlin-kapt'
 
 apply(plugin: "org.jetbrains.kotlin.plugin.compose")
 
-def cloudTtsDebugBaseUrl = project.findProperty("CLOUD_TTS_DEBUG_BASE_URL") ?: "http://140.238.89.232:3010"
-def cloudTtsReleaseBaseUrl = project.findProperty("CLOUD_TTS_RELEASE_BASE_URL") ?: "http://140.238.89.232:3010"
+def cloudTtsDebugBaseUrl = project.findProperty("CLOUD_TTS_DEBUG_BASE_URL") ?: "https://quicknovel-140-238-89-232.sslip.io"
+def cloudTtsReleaseBaseUrl = project.findProperty("CLOUD_TTS_RELEASE_BASE_URL") ?: "https://quicknovel-140-238-89-232.sslip.io"
 
 android {
     compileSdkVersion 37
