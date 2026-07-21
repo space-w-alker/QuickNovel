@@ -143,7 +143,7 @@ class CloudTtsRepository(
         throw CloudTtsException(
             apiError?.code ?: "http_${response.status}",
             apiError?.message ?: "Cloud TTS request failed. Please try again.",
-            apiError?.retryable ?: response.status >= 500,
+            apiError?.retryable ?: (response.status >= 500),
         )
     }
 }
