@@ -1,5 +1,7 @@
 package com.lagradost.quicknovel.tts.cloud
 
+import android.os.SystemClock
+import android.util.Log
 import com.lagradost.quicknovel.BuildConfig
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -16,6 +18,10 @@ class CloudTtsApi(
         .callTimeout(60, TimeUnit.SECONDS)
         .build(),
 ) {
+    private companion object {
+        const val TAG = "CloudTTS"
+    }
+
     private val root = baseUrl.trimEnd('/')
     private val json = "application/json; charset=utf-8".toMediaType()
 
@@ -35,11 +41,33 @@ class CloudTtsApi(
 
     fun download(url: String): Response = execute(Request.Builder().url(url).get().build())
 
-    private fun execute(request: Request): Response = client.newCall(request).execute().use { response ->
-        Response(
-            response.code,
-            response.body?.bytes() ?: ByteArray(0),
-            response.header("Retry-After")?.toLongOrNull()?.times(1000),
-        )
+    private fun execute(request: Request): Response {
+        val safeUrl = request.url.newBuilder().query(null).build()
+        val startedAt = SystemClock.elapsedRealtime()
+        Log.i(TAG, "HTTP ${request.method} $safeUrl starting")
+        return try {
+            client.newCall(request).execute().use { response ->
+                val body = response.body?.bytes() ?: ByteArray(0)
+                Log.i(
+                    TAG,
+                    "HTTP ${request.method} $safeUrl completed status=${response.code} " +
+                        "bytes=${body.size} elapsedMs=${SystemClock.elapsedRealtime() - startedAt}",
+                )
+                Response(
+                    response.code,
+                    body,
+                    response.header("Retry-After")?.toLongOrNull()?.times(1000),
+                )
+            }
+        } catch (error: Exception) {
+            Log.e(
+                TAG,
+                "HTTP ${request.method} $safeUrl failed after " +
+                    "${SystemClock.elapsedRealtime() - startedAt}ms: " +
+                    "${error.javaClass.simpleName}: ${error.message}",
+                error,
+            )
+            throw error
+        }
     }
 }

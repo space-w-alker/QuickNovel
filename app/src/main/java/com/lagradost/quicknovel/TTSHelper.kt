@@ -734,6 +734,46 @@ object TTSHelper {
 
         return ttsLines
     }
+
+    fun ttsParseParagraphs(text: String, tag: Int): ArrayList<TTSLine> {
+        val sentences = ttsParseText(text, tag)
+        if (sentences.isEmpty()) return arrayListOf()
+
+        val paragraphs = ArrayList<TTSLine>()
+        var paragraphStart = sentences.first().startChar
+        var paragraphEnd = sentences.first().endChar
+        val paragraphText = StringBuilder(sentences.first().speakOutMsg)
+
+        fun addParagraph() {
+            paragraphs.add(
+                TTSLine(
+                    speakOutMsg = paragraphText.toString(),
+                    startChar = paragraphStart,
+                    endChar = paragraphEnd,
+                    index = tag,
+                )
+            )
+        }
+
+        for (sentence in sentences.drop(1)) {
+            val separator = text.substring(paragraphEnd, sentence.startChar)
+            if (separator.contains('\n')) {
+                addParagraph()
+                paragraphText.clear()
+                paragraphText.append(sentence.speakOutMsg)
+                paragraphStart = sentence.startChar
+            } else {
+                if (paragraphText.isNotEmpty() && !paragraphText.last().isWhitespace()) {
+                    paragraphText.append(' ')
+                }
+                paragraphText.append(sentence.speakOutMsg)
+            }
+            paragraphEnd = sentence.endChar
+        }
+        addParagraph()
+
+        return paragraphs
+    }
 }
 
 enum class TtsEngine(val preferenceValue: String) {

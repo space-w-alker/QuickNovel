@@ -46,6 +46,7 @@ import com.lagradost.quicknovel.CommonActivity.activity
 import com.lagradost.quicknovel.CommonActivity.showToast
 import com.lagradost.quicknovel.TTSHelper.parseTextToSpans
 import com.lagradost.quicknovel.TTSHelper.preParseHtml
+import com.lagradost.quicknovel.TTSHelper.ttsParseParagraphs
 import com.lagradost.quicknovel.TTSHelper.ttsParseText
 import com.lagradost.quicknovel.mvvm.Resource
 import com.lagradost.quicknovel.mvvm.letInner
@@ -456,6 +457,10 @@ data class LiveChapterData(
     // tts lines are lazy because not everyone uses tts
     val ttsLines by lazy {
         ttsParseText(rendered.substring(0, rendered.length), index)
+    }
+
+    val cloudTtsParagraphs by lazy {
+        ttsParseParagraphs(rendered.substring(0, rendered.length), index)
     }
 }
 
@@ -1476,6 +1481,11 @@ class ReadActivityViewModel : ViewModel() {
     }
 
     fun startTTS() {
+        Log.i(
+            "CloudTTS",
+            "Start button pressed engine=$ttsEngine status=$currentTTSStatus " +
+                "consentVersion=$cloudTtsConsentVersion model=$cloudTtsModelId voice=$cloudTtsVoiceId",
+        )
         if (ttsEngine == TtsEngine.Cloud && cloudTtsConsentVersion < CLOUD_TTS_CONSENT_VERSION) {
             cloudTtsConsentRequired(Unit)
             return
@@ -1525,15 +1535,22 @@ class ReadActivityViewModel : ViewModel() {
 
     suspend fun startTTSThread() = coroutineScope {
         val selectedCloud = ttsEngine == TtsEngine.Cloud
+        Log.i("CloudTTS", "TTS worker entered selectedCloud=$selectedCloud status=$currentTTSStatus")
         if (selectedCloud) currentTTSStatus = TTSHelper.TTSStatus.Preparing
         val engine = try {
             createPlaybackEngine()
         } catch (error: CloudTtsException) {
+            Log.e(
+                "CloudTTS",
+                "Playback engine creation failed code=${error.code} retryable=${error.retryable}",
+                error,
+            )
             cloudTtsError(error.message)
             currentTTSStatus = TTSHelper.TTSStatus.IsStopped
             return@coroutineScope
         }
         playbackEngine = engine
+        Log.i("CloudTTS", "Playback engine ready type=${engine.javaClass.simpleName}")
         if (currentTTSStatus == TTSHelper.TTSStatus.IsPaused) engine.pause()
         else if (engine is CloudTtsEngine) currentTTSStatus = TTSHelper.TTSStatus.Preparing
         try {
@@ -1558,7 +1575,7 @@ class ReadActivityViewModel : ViewModel() {
 
                     val lines = chapterMutex.withLock {
                         chapterData[index].letInner {
-                            it.ttsLines
+                            if (selectedCloud) it.cloudTtsParagraphs else it.ttsLines
                         }
                     } ?: run {
                         // in case of error just go to the next chapter
@@ -1596,7 +1613,8 @@ class ReadActivityViewModel : ViewModel() {
                             }
 
                             is Resource.Success -> {
-                                currentData.value.ttsLines
+                                if (selectedCloud) currentData.value.cloudTtsParagraphs
+                                else currentData.value.ttsLines
                             }
                         }
 
@@ -1651,7 +1669,7 @@ class ReadActivityViewModel : ViewModel() {
                         val line = lines[ttsInnerIndex]
                         val upcoming = lines.subList(
                             (ttsInnerIndex + 1).coerceAtMost(lines.size),
-                            (ttsInnerIndex + 3).coerceAtMost(lines.size),
+                            (ttsInnerIndex + 6).coerceAtMost(lines.size),
                         )
 
                         // set keys
@@ -1735,6 +1753,11 @@ class ReadActivityViewModel : ViewModel() {
         } catch (_: TimeoutCancellationException) {
 
         } catch (error: CloudTtsException) {
+            Log.e(
+                "CloudTTS",
+                "Playback stopped by cloud error code=${error.code} retryable=${error.retryable}",
+                error,
+            )
             logError(error)
             cloudTtsError(error.message)
         } catch (t: Throwable) {

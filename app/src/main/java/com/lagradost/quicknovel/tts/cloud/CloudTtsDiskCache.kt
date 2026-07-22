@@ -3,7 +3,7 @@ package com.lagradost.quicknovel.tts.cloud
 import android.content.Context
 import java.io.File
 
-class CloudTtsDiskCache(context: Context, private val maxBytes: Long = 100L * 1024 * 1024) {
+class CloudTtsDiskCache(context: Context, private val maxBytes: Long = 5L * 1024 * 1024 * 1024) {
     private val directory = File(context.cacheDir, "cloud_tts_audio").apply { mkdirs() }
 
     @Synchronized fun get(cacheKey: String): File? = file(cacheKey).takeIf { it.isFile }?.also {

@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.PlaybackParams
+import android.util.Log
 import com.lagradost.quicknovel.ReaderTtsEngine
 import com.lagradost.quicknovel.TTSHelper
 import com.lagradost.quicknovel.TtsPlaybackResult
@@ -32,9 +33,13 @@ class CloudTtsEngine(
     private val onPreparing: () -> Unit,
     private val onPlaying: () -> Unit,
 ) : ReaderTtsEngine {
+    private companion object {
+        const val TAG = "CloudTTS"
+    }
+
     private val cache = CloudTtsDiskCache(context.applicationContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val resolveSlots = Semaphore(2)
+    private val resolveSlots = Semaphore(3)
     private val prepared = ConcurrentHashMap<String, kotlinx.coroutines.Deferred<File>>()
     private val playerLock = Any()
     @Volatile private var player: MediaPlayer? = null
@@ -93,8 +98,13 @@ class CloudTtsEngine(
     ): TtsPlaybackResult {
         coroutineContext.ensureActive()
         val currentKey = requestKey(line.speakOutMsg)
+        Log.i(
+            TAG,
+            "Playback requested key=${currentKey.take(12)} chars=${line.speakOutMsg.length} " +
+                "prefetch=${upcoming.take(5).size}",
+        )
         val current = prepared.getOrPut(currentKey) { prepare(line.speakOutMsg) }
-        upcoming.take(2).forEach { next ->
+        upcoming.take(5).forEach { next ->
             val key = requestKey(next.speakOutMsg)
             prepared.getOrPut(key) { prepare(next.speakOutMsg) }
         }
@@ -108,6 +118,7 @@ class CloudTtsEngine(
         } finally {
             prepared.remove(currentKey, current)
         }
+        Log.i(TAG, "Audio prepared key=${currentKey.take(12)} bytes=${audio.length()}")
         if (shouldCancel()) return TtsPlaybackResult.Interrupted
 
         val completed = AtomicBoolean(false)
@@ -135,6 +146,7 @@ class CloudTtsEngine(
             if (shouldCancel()) return TtsPlaybackResult.Interrupted
             onPlaying()
             playbackStarted = true
+            Log.i(TAG, "MediaPlayer starting key=${currentKey.take(12)} speed=$speed")
             mediaPlayer.start()
             while (coroutineContext.isActive && !completed.get()) {
                 if (shouldCancel()) return TtsPlaybackResult.Interrupted
@@ -143,6 +155,7 @@ class CloudTtsEngine(
             playbackError[0]?.let {
                 throw CloudTtsException("playback_failed", "Cloud TTS audio could not be played.", cause = it)
             }
+            Log.i(TAG, "Playback completed key=${currentKey.take(12)}")
             return TtsPlaybackResult.Completed
         } finally {
             synchronized(playerLock) {
@@ -158,8 +171,14 @@ class CloudTtsEngine(
 
     private fun prepare(text: String) = scope.async {
         resolveSlots.withPermit {
+            val requestKey = requestKey(text)
+            Log.i(TAG, "Preparing audio key=${requestKey.take(12)}")
             var result = repository.resolve(modelId, voiceId, text)
-            cache.get(result.cacheKey)?.let { return@withPermit it }
+            cache.get(result.cacheKey)?.let {
+                Log.i(TAG, "Audio cache hit key=${result.cacheKey.take(12)} bytes=${it.length()}")
+                return@withPermit it
+            }
+            Log.i(TAG, "Audio cache miss key=${result.cacheKey.take(12)}")
             val bytes = try {
                 repository.download(result.audio!!.url)
             } catch (error: CloudTtsException) {
