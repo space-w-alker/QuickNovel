@@ -312,8 +312,9 @@
     <string name="tts_engine">Speech engine</string>
     <string name="tts_engine_device">Device TTS</string>
     <string name="tts_engine_cloud">Cloud TTS</string>
-    <string name="cloud_tts_model_loading">Cloud model: loading…</string>
-    <string name="cloud_tts_voice">Cloud voice</string>
+    <string name="cloud_tts_model_loading">Quality: loading…</string>
+    <string name="cloud_tts_quality">Quality</string>
+    <string name="cloud_tts_voice">Voice</string>
     <string name="cloud_tts_consent_title">Use Cloud TTS?</string>
     <string name="cloud_tts_consent_message">Chapter text is sent to the QuickNovel server. Generated audio is retained permanently and shared across installations using the same synthesis settings. Cloud playback requires internet access.</string>
     <string name="cloud_tts_agree">Agree and use Cloud TTS</string>

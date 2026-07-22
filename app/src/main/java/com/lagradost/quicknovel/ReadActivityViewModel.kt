@@ -76,6 +76,8 @@ import com.lagradost.quicknovel.tts.cloud.CloudCatalog
 import com.lagradost.quicknovel.tts.cloud.CloudTtsEngine
 import com.lagradost.quicknovel.tts.cloud.CloudTtsException
 import com.lagradost.quicknovel.tts.cloud.CloudTtsRepository
+import com.lagradost.quicknovel.tts.cloud.CloudModel
+import com.lagradost.quicknovel.tts.cloud.CloudVoice
 import com.lagradost.safefile.closeQuietly
 import io.noties.markwon.AbstractMarkwonPlugin
 import io.noties.markwon.Markwon
@@ -1383,9 +1385,7 @@ class ReadActivityViewModel : ViewModel() {
         try {
             val catalog = requireCloudTtsRepository().catalog()
             _cloudTtsCatalog.postValue(catalog)
-            if (cloudTtsModelId.isBlank()) cloudTtsModelId = catalog.models.firstOrNull()?.id.orEmpty()
-            val model = catalog.models.firstOrNull { it.id == cloudTtsModelId }
-            if (cloudTtsVoiceId.isBlank()) cloudTtsVoiceId = model?.voices?.firstOrNull()?.id.orEmpty()
+            reconcileCloudTtsSelection(catalog)
             onLoaded?.let { callback -> runOnMainThread { callback(catalog) } }
         } catch (error: CloudTtsException) {
             cloudTtsError(error.message)
@@ -1403,6 +1403,26 @@ class ReadActivityViewModel : ViewModel() {
         ttsEngine = TtsEngine.Device
     }
 
+    fun selectCloudTtsModel(model: CloudModel) {
+        if (model.id == cloudTtsModelId) return
+        stopTTS()
+        cloudTtsModelId = model.id
+        cloudTtsVoiceId = model.voices.firstOrNull { it.id == cloudTtsVoiceId }?.id
+            ?: model.voices.firstOrNull()?.id.orEmpty()
+    }
+
+    fun selectCloudTtsVoice(voice: CloudVoice) {
+        if (voice.id == cloudTtsVoiceId) return
+        stopTTS()
+        cloudTtsVoiceId = voice.id
+    }
+
+    private fun reconcileCloudTtsSelection(catalog: CloudCatalog) =
+        catalog.resolveSelection(cloudTtsModelId, cloudTtsVoiceId)?.also { selection ->
+            cloudTtsModelId = selection.model.id
+            cloudTtsVoiceId = selection.voice.id
+        }
+
     private suspend fun createPlaybackEngine(): ReaderTtsEngine {
         if (ttsEngine == TtsEngine.Device) {
             return DeviceTtsEngine(ttsSession ?: throw IllegalStateException("Device TTS is unavailable"))
@@ -1412,25 +1432,14 @@ class ReadActivityViewModel : ViewModel() {
         }
         val repository = requireCloudTtsRepository()
         val catalog = repository.catalog().also { _cloudTtsCatalog.postValue(it) }
-        val model = if (cloudTtsModelId.isBlank()) {
-            catalog.models.firstOrNull()?.also { cloudTtsModelId = it.id }
-        } else {
-            catalog.models.firstOrNull { it.id == cloudTtsModelId }
-        } ?: throw CloudTtsException(
+        val selection = reconcileCloudTtsSelection(catalog) ?: throw CloudTtsException(
             "catalog_entry_unavailable", "The selected Cloud TTS model is no longer available."
-        )
-        val voice = if (cloudTtsVoiceId.isBlank()) {
-            model.voices.firstOrNull()?.also { cloudTtsVoiceId = it.id }
-        } else {
-            model.voices.firstOrNull { it.id == cloudTtsVoiceId }
-        } ?: throw CloudTtsException(
-            "catalog_entry_unavailable", "The selected Cloud TTS voice is no longer available."
         )
         return CloudTtsEngine(
             context ?: throw IllegalStateException("Application context is unavailable"),
             repository,
-            model.id,
-            voice.id,
+            selection.model.id,
+            selection.voice.id,
             onPreparing = {
                 if (currentTTSStatus != TTSHelper.TTSStatus.IsStopped &&
                     currentTTSStatus != TTSHelper.TTSStatus.IsPaused

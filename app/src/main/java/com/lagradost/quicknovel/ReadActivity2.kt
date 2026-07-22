@@ -1234,7 +1234,7 @@ class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
                         {},
                     ) { selected ->
                         model.voices.getOrNull(selected)?.let { voice ->
-                            viewModel.cloudTtsVoiceId = voice.id
+                            viewModel.selectCloudTtsVoice(voice)
                             binding.readCloudTtsVoice.text = voice.displayName
                         }
                     }
@@ -1247,15 +1247,15 @@ class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
                     this.showDialog(
                         catalog.models.map { it.displayName },
                         catalog.models.indexOfFirst { it.id == viewModel.cloudTtsModelId },
-                        getString(R.string.tts_engine_cloud),
+                        getString(R.string.cloud_tts_quality),
                         false,
                         {},
                     ) { selected ->
                         catalog.models.getOrNull(selected)?.let { model ->
-                            viewModel.cloudTtsModelId = model.id
-                            viewModel.cloudTtsVoiceId = model.voices.firstOrNull()?.id.orEmpty()
+                            viewModel.selectCloudTtsModel(model)
                             binding.readCloudTtsModel.text = model.displayName
-                            binding.readCloudTtsVoice.text = model.voices.firstOrNull()?.displayName
+                            binding.readCloudTtsVoice.text = model.voices
+                                .firstOrNull { it.id == viewModel.cloudTtsVoiceId }?.displayName
                                 ?: getString(R.string.cloud_tts_voice)
                         }
                     }

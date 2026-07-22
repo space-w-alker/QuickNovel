@@ -43,7 +43,21 @@ data class CloudModel(
 data class CloudCatalog(
     @JsonProperty("catalog_version") val catalogVersion: String,
     val models: List<CloudModel> = emptyList(),
-)
+) {
+    fun resolveSelection(preferredModelId: String, preferredVoiceId: String): CloudTtsSelection? {
+        val model = models.firstOrNull { it.id == preferredModelId }
+            ?: models.firstOrNull { it.id == "standard" }
+            ?: models.firstOrNull()
+            ?: return null
+        val voice = model.voices.firstOrNull { it.id == preferredVoiceId }
+            ?: model.voices.firstOrNull { it.id == "male" }
+            ?: model.voices.firstOrNull()
+            ?: return null
+        return CloudTtsSelection(model, voice)
+    }
+}
+
+data class CloudTtsSelection(val model: CloudModel, val voice: CloudVoice)
 
 data class ResolveChunkRequest(
     @JsonProperty("model_id") val modelId: String,
