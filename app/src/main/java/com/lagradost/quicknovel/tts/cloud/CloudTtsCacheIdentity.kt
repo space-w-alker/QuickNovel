@@ -6,15 +6,17 @@ import java.security.MessageDigest
 object CloudTtsCacheIdentity {
     fun create(
         normalizedText: String,
-        modelCacheRevision: String,
-        voiceId: String,
+        provider: String,
+        model: String,
+        voice: String,
         outputFormat: String = "mp3",
     ): String {
         val input = listOf(
-            "quicknovel-tts-cache-v1",
+            "quicknovel-tts-cache-v4",
             normalizedText,
-            modelCacheRevision,
-            voiceId,
+            provider,
+            model,
+            voice,
             outputFormat,
         ).joinToString("\u0000")
         return MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))

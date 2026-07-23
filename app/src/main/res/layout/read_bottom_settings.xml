@@ -229,6 +229,21 @@
                         android:layout_width="match_parent"
                         android:layout_marginTop="10dp"
                         android:text="@string/cloud_tts_voice" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/read_cloud_tts_source"
+                        style="@style/BlackButton"
+                        android:layout_width="match_parent"
+                        android:layout_marginTop="10dp"
+                        android:text="@string/cloud_tts_source_backend" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/read_cloud_tts_api_key"
+                        style="@style/BlackButton"
+                        android:layout_width="match_parent"
+                        android:layout_marginTop="10dp"
+                        android:text="@string/cloud_tts_manage_key"
+                        android:visibility="gone" />
                 </LinearLayout>
 
                 <LinearLayout

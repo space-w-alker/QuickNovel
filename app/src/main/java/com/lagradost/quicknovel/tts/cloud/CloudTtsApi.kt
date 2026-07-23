@@ -5,6 +5,7 @@ import android.util.Log
 import com.lagradost.quicknovel.BuildConfig
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.MultipartBody
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
@@ -38,6 +39,18 @@ class CloudTtsApi(
             token?.let { header("Authorization", "Bearer $it") }
         }.build()
     )
+
+    fun upload(path: String, metadata: String, audio: ByteArray, token: String): Response {
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("metadata", metadata)
+            .addFormDataPart("audio", "speech.mp3", audio.toRequestBody("audio/mpeg".toMediaType()))
+            .build()
+        return execute(
+            Request.Builder().url("$root$path").post(body)
+                .header("Authorization", "Bearer $token")
+                .build()
+        )
+    }
 
     fun download(url: String): Response = execute(Request.Builder().url(url).get().build())
 

@@ -78,6 +78,9 @@ import com.lagradost.quicknovel.tts.cloud.CloudTtsException
 import com.lagradost.quicknovel.tts.cloud.CloudTtsRepository
 import com.lagradost.quicknovel.tts.cloud.CloudModel
 import com.lagradost.quicknovel.tts.cloud.CloudVoice
+import com.lagradost.quicknovel.tts.cloud.CloudTtsGenerationSource
+import com.lagradost.quicknovel.tts.cloud.CloudTtsProvider
+import com.lagradost.quicknovel.tts.cloud.CloudTtsSelection
 import com.lagradost.safefile.closeQuietly
 import io.noties.markwon.AbstractMarkwonPlugin
 import io.noties.markwon.Markwon
@@ -1360,7 +1363,7 @@ class ReadActivityViewModel : ViewModel() {
     val cloudTtsCatalog: LiveData<CloudCatalog?> = _cloudTtsCatalog
 
     companion object {
-        const val CLOUD_TTS_CONSENT_VERSION = 1
+        const val CLOUD_TTS_CONSENT_VERSION = 2
     }
 
     private fun initTTSSession(context: Context) {
@@ -1406,6 +1409,7 @@ class ReadActivityViewModel : ViewModel() {
     fun selectCloudTtsModel(model: CloudModel) {
         if (model.id == cloudTtsModelId) return
         stopTTS()
+        cloudTtsSelectionMode = "preset"
         cloudTtsModelId = model.id
         cloudTtsVoiceId = model.voices.firstOrNull { it.id == cloudTtsVoiceId }?.id
             ?: model.voices.firstOrNull()?.id.orEmpty()
@@ -1419,9 +1423,36 @@ class ReadActivityViewModel : ViewModel() {
 
     private fun reconcileCloudTtsSelection(catalog: CloudCatalog) =
         catalog.resolveSelection(cloudTtsModelId, cloudTtsVoiceId)?.also { selection ->
-            cloudTtsModelId = selection.model.id
-            cloudTtsVoiceId = selection.voice.id
+            cloudTtsModelId = selection.presetModel!!.id
+            cloudTtsVoiceId = selection.presetVoice!!.id
         }
+
+    fun selectCloudTtsCustom(provider: CloudTtsProvider, model: String, voice: String) {
+        stopTTS()
+        cloudTtsSelectionMode = "custom"
+        cloudTtsProviderId = provider.wireValue
+        cloudTtsCustomModel = model.trim()
+        cloudTtsCustomVoice = voice.trim()
+    }
+
+    fun useCloudTtsPresets() {
+        if (cloudTtsSelectionMode != "preset") stopTTS()
+        cloudTtsSelectionMode = "preset"
+    }
+
+    fun selectCloudTtsGenerationSource(source: CloudTtsGenerationSource) {
+        if (cloudTtsGenerationSource != source.wireValue) stopTTS()
+        cloudTtsGenerationSource = source.wireValue
+    }
+
+    fun hasCloudTtsApiKey(provider: CloudTtsProvider): Boolean =
+        requireCloudTtsRepository().hasApiKey(provider)
+
+    fun setCloudTtsApiKey(provider: CloudTtsProvider, key: String) =
+        requireCloudTtsRepository().setApiKey(provider, key)
+
+    fun clearCloudTtsApiKey(provider: CloudTtsProvider) =
+        requireCloudTtsRepository().clearApiKey(provider)
 
     private suspend fun createPlaybackEngine(): ReaderTtsEngine {
         if (ttsEngine == TtsEngine.Device) {
@@ -1432,14 +1463,24 @@ class ReadActivityViewModel : ViewModel() {
         }
         val repository = requireCloudTtsRepository()
         val catalog = repository.catalog().also { _cloudTtsCatalog.postValue(it) }
-        val selection = reconcileCloudTtsSelection(catalog) ?: throw CloudTtsException(
-            "catalog_entry_unavailable", "The selected Cloud TTS model is no longer available."
-        )
+        val selection = if (cloudTtsSelectionMode == "custom") {
+            val provider = CloudTtsProvider.fromWire(cloudTtsProviderId)
+            if (cloudTtsCustomModel.isBlank() || cloudTtsCustomVoice.isBlank()) {
+                throw CloudTtsException("invalid_tts_selection", "Enter a custom model and voice.")
+            }
+            val maximum = catalog.providers.firstOrNull { it.id == provider.wireValue }
+                ?.maxInputCharacters ?: if (provider == CloudTtsProvider.Speechify) 2000 else 4000
+            CloudTtsSelection(provider, cloudTtsCustomModel, cloudTtsCustomVoice, maximum)
+        } else {
+            reconcileCloudTtsSelection(catalog) ?: throw CloudTtsException(
+                "catalog_entry_unavailable", "The selected Cloud TTS model is no longer available."
+            )
+        }
         return CloudTtsEngine(
             context ?: throw IllegalStateException("Application context is unavailable"),
             repository,
-            selection.model.id,
-            selection.voice.id,
+            selection,
+            CloudTtsGenerationSource.fromWire(cloudTtsGenerationSource),
             onPreparing = {
                 if (currentTTSStatus != TTSHelper.TTSStatus.IsStopped &&
                     currentTTSStatus != TTSHelper.TTSStatus.IsPaused
@@ -1963,6 +2004,13 @@ class ReadActivityViewModel : ViewModel() {
     var cloudTtsModelId by PreferenceDelegate(EPUB_CLOUD_TTS_MODEL, "", String::class)
     var cloudTtsVoiceId by PreferenceDelegate(EPUB_CLOUD_TTS_VOICE, "", String::class)
     var cloudTtsConsentVersion by PreferenceDelegate(EPUB_CLOUD_TTS_CONSENT_VERSION, 0, Int::class)
+    var cloudTtsSelectionMode by PreferenceDelegate(EPUB_CLOUD_TTS_SELECTION_MODE, "preset", String::class)
+    var cloudTtsProviderId by PreferenceDelegate(EPUB_CLOUD_TTS_PROVIDER, "openrouter", String::class)
+    var cloudTtsGenerationSource by PreferenceDelegate(
+        EPUB_CLOUD_TTS_GENERATION_SOURCE, "backend", String::class
+    )
+    var cloudTtsCustomModel by PreferenceDelegate(EPUB_CLOUD_TTS_CUSTOM_MODEL, "", String::class)
+    var cloudTtsCustomVoice by PreferenceDelegate(EPUB_CLOUD_TTS_CUSTOM_VOICE, "", String::class)
     //var ttsOSSpeed by PreferenceDelegate(EPUB_TTS_OS_SPEED, true, Boolean::class)
 
     private var ttsSpeedKey by PreferenceDelegate(EPUB_TTS_SET_SPEED, 1.0f, Float::class)

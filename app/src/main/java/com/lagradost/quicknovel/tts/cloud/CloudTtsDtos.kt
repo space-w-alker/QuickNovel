@@ -1,6 +1,27 @@
 package com.lagradost.quicknovel.tts.cloud
 
+import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.annotation.JsonProperty
+
+enum class CloudTtsProvider(val wireValue: String) {
+    OpenRouter("openrouter"),
+    Speechify("speechify");
+
+    companion object {
+        fun fromWire(value: String): CloudTtsProvider =
+            entries.firstOrNull { it.wireValue == value } ?: OpenRouter
+    }
+}
+
+enum class CloudTtsGenerationSource(val wireValue: String) {
+    Backend("backend"),
+    Byok("byok");
+
+    companion object {
+        fun fromWire(value: String): CloudTtsGenerationSource =
+            entries.firstOrNull { it.wireValue == value } ?: Backend
+    }
+}
 
 data class CloudQuota(
     @JsonProperty("characters_remaining") val charactersRemaining: Int = 0,
@@ -24,12 +45,15 @@ data class InstallationToken(
     @JsonProperty("access_token_expires_at") val accessTokenExpiresAt: String? = null,
     @JsonProperty("refresh_token") val refreshToken: String? = null,
     val quota: CloudQuota? = null,
+    @JsonProperty("backend_generation_status") val backendGenerationStatus: String = "pending",
 )
 
 data class CloudVoice(
     val id: String,
     @JsonProperty("display_name") val displayName: String,
     val locale: String? = null,
+    val gender: String = id,
+    val voice: String = id,
 )
 
 data class CloudModel(
@@ -37,11 +61,23 @@ data class CloudModel(
     @JsonProperty("display_name") val displayName: String,
     @JsonProperty("cache_revision") val cacheRevision: String,
     @JsonProperty("output_format") val outputFormat: String,
+    val provider: String = "openrouter",
+    val model: String = id,
+    @JsonProperty("max_input_characters") val maxInputCharacters: Int = 4000,
     val voices: List<CloudVoice> = emptyList(),
+)
+
+data class CloudProviderCapability(
+    val id: String,
+    @JsonProperty("display_name") val displayName: String,
+    @JsonProperty("max_input_characters") val maxInputCharacters: Int,
+    @JsonProperty("byok_supported") val byokSupported: Boolean = true,
+    @JsonProperty("backend_available") val backendAvailable: Boolean = false,
 )
 
 data class CloudCatalog(
     @JsonProperty("catalog_version") val catalogVersion: String,
+    val providers: List<CloudProviderCapability> = emptyList(),
     val models: List<CloudModel> = emptyList(),
 ) {
     fun resolveSelection(preferredModelId: String, preferredVoiceId: String): CloudTtsSelection? {
@@ -53,17 +89,56 @@ data class CloudCatalog(
             ?: model.voices.firstOrNull { it.id == "male" }
             ?: model.voices.firstOrNull()
             ?: return null
-        return CloudTtsSelection(model, voice)
+        return CloudTtsSelection(
+            provider = CloudTtsProvider.fromWire(model.provider),
+            modelId = model.model,
+            voiceId = voice.voice,
+            maxInputCharacters = model.maxInputCharacters,
+            presetModel = model,
+            presetVoice = voice,
+        )
     }
 }
 
-data class CloudTtsSelection(val model: CloudModel, val voice: CloudVoice)
+data class CloudTtsSelection(
+    val provider: CloudTtsProvider,
+    val modelId: String,
+    val voiceId: String,
+    val maxInputCharacters: Int,
+    val presetModel: CloudModel? = null,
+    val presetVoice: CloudVoice? = null,
+) {
+    val isPreset: Boolean get() = presetModel != null && presetVoice != null
 
+    fun request(text: String, source: CloudTtsGenerationSource): ResolveChunkRequest =
+        if (isPreset) {
+            ResolveChunkRequest(
+                quality = presetModel!!.id,
+                gender = presetVoice!!.id,
+                generationSource = source.wireValue,
+                text = text,
+            )
+        } else {
+            ResolveChunkRequest(
+                provider = provider.wireValue,
+                model = modelId,
+                voice = voiceId,
+                generationSource = source.wireValue,
+                text = text,
+            )
+        }
+}
+
+@JsonInclude(JsonInclude.Include.NON_NULL)
 data class ResolveChunkRequest(
-    @JsonProperty("model_id") val modelId: String,
-    @JsonProperty("voice_id") val voiceId: String,
+    val quality: String? = null,
+    val gender: String? = null,
+    val provider: String? = null,
+    val model: String? = null,
+    val voice: String? = null,
+    @JsonProperty("generation_source") val generationSource: String = "backend",
     val text: String,
-    @JsonProperty("chunker_version") val chunkerVersion: Int = 1,
+    @JsonProperty("chunker_version") val chunkerVersion: Int = 2,
 )
 
 data class CloudAudio(
@@ -74,6 +149,8 @@ data class CloudAudio(
     @JsonProperty("duration_ms") val durationMs: Long? = null,
 )
 
+data class CanonicalSelection(val provider: String, val model: String, val voice: String)
+
 data class ResolveResult(
     val state: String,
     @JsonProperty("cache_key") val cacheKey: String,
@@ -82,6 +159,7 @@ data class ResolveResult(
     @JsonProperty("retry_after_ms") val retryAfterMs: Long? = null,
     val audio: CloudAudio? = null,
     val quota: CloudQuota? = null,
+    val selection: CanonicalSelection? = null,
 )
 
 data class ApiErrorEnvelope(val error: CloudApiError)

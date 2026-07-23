@@ -21,6 +21,7 @@ import android.view.WindowManager
 import android.widget.AbsListView
 import android.widget.ArrayAdapter
 import android.widget.FrameLayout
+import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import androidx.activity.viewModels
@@ -80,6 +81,8 @@ import kotlin.math.roundToInt
 import kotlin.properties.Delegates
 import com.google.android.material.tabs.TabLayout
 import com.lagradost.quicknovel.ReadActivityViewModel.MLSettings.Companion.AUTO_LANG
+import com.lagradost.quicknovel.tts.cloud.CloudTtsGenerationSource
+import com.lagradost.quicknovel.tts.cloud.CloudTtsProvider
 
 class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
     companion object {
@@ -1174,6 +1177,63 @@ class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
                 view.isVisible = index == 0
             }
 
+            fun selectedCloudProvider(): CloudTtsProvider {
+                if (viewModel.cloudTtsSelectionMode == "custom") {
+                    return CloudTtsProvider.fromWire(viewModel.cloudTtsProviderId)
+                }
+                val model = viewModel.cloudTtsCatalog.value?.models
+                    ?.firstOrNull { it.id == viewModel.cloudTtsModelId }
+                return CloudTtsProvider.fromWire(model?.provider ?: "openrouter")
+            }
+
+            fun showCloudApiKeyDialog(provider: CloudTtsProvider) {
+                val view = layoutInflater.inflate(R.layout.cloud_tts_key_dialog, null)
+                val input = view.findViewById<EditText>(R.id.cloud_tts_key_value)
+                AlertDialog.Builder(this, R.style.AlertDialogCustom)
+                    .setTitle("${provider.name} ${getString(R.string.cloud_tts_api_key)}")
+                    .setView(view)
+                    .setPositiveButton(R.string.cloud_tts_save_key) { _, _ ->
+                        if (input.text.isNotBlank()) {
+                            viewModel.setCloudTtsApiKey(provider, input.text.toString())
+                            viewModel.selectCloudTtsGenerationSource(CloudTtsGenerationSource.Byok)
+                            binding.readCloudTtsSource.setText(R.string.cloud_tts_source_byok)
+                            binding.readCloudTtsApiKey.isVisible = true
+                        }
+                    }
+                    .setNeutralButton(R.string.cloud_tts_clear_key) { _, _ ->
+                        viewModel.clearCloudTtsApiKey(provider)
+                        viewModel.selectCloudTtsGenerationSource(CloudTtsGenerationSource.Backend)
+                        binding.readCloudTtsSource.setText(R.string.cloud_tts_source_backend)
+                        binding.readCloudTtsApiKey.isVisible = false
+                    }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            }
+
+            fun showCustomCloudSelection(provider: CloudTtsProvider) {
+                val view = layoutInflater.inflate(R.layout.cloud_tts_custom_dialog, null)
+                val modelInput = view.findViewById<EditText>(R.id.cloud_tts_custom_model)
+                val voiceInput = view.findViewById<EditText>(R.id.cloud_tts_custom_voice)
+                modelInput.setText(viewModel.cloudTtsCustomModel)
+                voiceInput.setText(viewModel.cloudTtsCustomVoice)
+                AlertDialog.Builder(this, R.style.AlertDialogCustom)
+                    .setTitle("${provider.name} ${getString(R.string.cloud_tts_custom)}")
+                    .setView(view)
+                    .setPositiveButton(android.R.string.ok) { _, _ ->
+                        if (modelInput.text.isNotBlank() && voiceInput.text.isNotBlank()) {
+                            viewModel.selectCloudTtsCustom(
+                                provider,
+                                modelInput.text.toString(),
+                                voiceInput.text.toString(),
+                            )
+                            binding.readCloudTtsModel.text = "${provider.name}: ${modelInput.text}"
+                            binding.readCloudTtsVoice.text = voiceInput.text
+                        }
+                    }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            }
+
             fun updateCloudSettings() {
                 val cloud = viewModel.ttsEngine == TtsEngine.Cloud
                 binding.readTtsEngine.setText(
@@ -1187,14 +1247,25 @@ class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
 
                 if (cloud) {
                     viewModel.loadCloudTtsCatalog { catalog ->
-                        val model = catalog.models.firstOrNull { it.id == viewModel.cloudTtsModelId }
-                        binding.readCloudTtsModel.isEnabled = catalog.models.size > 1
-                        binding.readCloudTtsModel.text = model?.displayName
-                            ?: getString(R.string.cloud_tts_model_loading)
-                        binding.readCloudTtsVoice.text = model?.voices
-                            ?.firstOrNull { it.id == viewModel.cloudTtsVoiceId }?.displayName
-                            ?: getString(R.string.cloud_tts_voice)
+                        if (viewModel.cloudTtsSelectionMode == "custom") {
+                            val provider = CloudTtsProvider.fromWire(viewModel.cloudTtsProviderId)
+                            binding.readCloudTtsModel.text = "${provider.name}: ${viewModel.cloudTtsCustomModel}"
+                            binding.readCloudTtsVoice.text = viewModel.cloudTtsCustomVoice
+                        } else {
+                            val model = catalog.models.firstOrNull { it.id == viewModel.cloudTtsModelId }
+                            binding.readCloudTtsModel.text = model?.displayName
+                                ?: getString(R.string.cloud_tts_model_loading)
+                            binding.readCloudTtsVoice.text = model?.voices
+                                ?.firstOrNull { it.id == viewModel.cloudTtsVoiceId }?.displayName
+                                ?: getString(R.string.cloud_tts_voice)
+                        }
+                        binding.readCloudTtsModel.isEnabled = true
                     }
+                    val byok = viewModel.cloudTtsGenerationSource == "byok"
+                    binding.readCloudTtsSource.setText(
+                        if (byok) R.string.cloud_tts_source_byok else R.string.cloud_tts_source_backend
+                    )
+                    binding.readCloudTtsApiKey.isVisible = byok
                 }
             }
 
@@ -1223,6 +1294,10 @@ class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
             }
 
             binding.readCloudTtsVoice.setOnClickListener {
+                if (viewModel.cloudTtsSelectionMode == "custom") {
+                    showCustomCloudSelection(CloudTtsProvider.fromWire(viewModel.cloudTtsProviderId))
+                    return@setOnClickListener
+                }
                 viewModel.loadCloudTtsCatalog { catalog ->
                     val model = catalog.models.firstOrNull { it.id == viewModel.cloudTtsModelId }
                         ?: return@loadCloudTtsCatalog
@@ -1243,23 +1318,73 @@ class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
 
             binding.readCloudTtsModel.setOnClickListener {
                 viewModel.loadCloudTtsCatalog { catalog ->
-                    if (catalog.models.size <= 1) return@loadCloudTtsCatalog
+                    val choices = catalog.models.map { it.displayName } + getString(R.string.cloud_tts_custom)
                     this.showDialog(
-                        catalog.models.map { it.displayName },
-                        catalog.models.indexOfFirst { it.id == viewModel.cloudTtsModelId },
+                        choices,
+                        if (viewModel.cloudTtsSelectionMode == "custom") catalog.models.size
+                        else catalog.models.indexOfFirst { it.id == viewModel.cloudTtsModelId },
                         getString(R.string.cloud_tts_quality),
                         false,
                         {},
                     ) { selected ->
-                        catalog.models.getOrNull(selected)?.let { model ->
-                            viewModel.selectCloudTtsModel(model)
-                            binding.readCloudTtsModel.text = model.displayName
-                            binding.readCloudTtsVoice.text = model.voices
-                                .firstOrNull { it.id == viewModel.cloudTtsVoiceId }?.displayName
-                                ?: getString(R.string.cloud_tts_voice)
+                        if (selected == catalog.models.size) {
+                            this.showDialog(
+                                CloudTtsProvider.entries.map { it.name },
+                                CloudTtsProvider.entries.indexOf(
+                                    CloudTtsProvider.fromWire(viewModel.cloudTtsProviderId)
+                                ),
+                                getString(R.string.cloud_tts_provider),
+                                false,
+                                {},
+                            ) { providerIndex ->
+                                CloudTtsProvider.entries.getOrNull(providerIndex)
+                                    ?.let(::showCustomCloudSelection)
+                            }
+                        } else {
+                            catalog.models.getOrNull(selected)?.let { model ->
+                                viewModel.selectCloudTtsModel(model)
+                                binding.readCloudTtsModel.text = model.displayName
+                                binding.readCloudTtsVoice.text = model.voices
+                                    .firstOrNull { it.id == viewModel.cloudTtsVoiceId }?.displayName
+                                    ?: getString(R.string.cloud_tts_voice)
+                            }
                         }
                     }
                 }
+            }
+
+            binding.readCloudTtsSource.setOnClickListener {
+                val sources = CloudTtsGenerationSource.entries
+                this.showDialog(
+                    listOf(
+                        getString(R.string.cloud_tts_source_backend),
+                        getString(R.string.cloud_tts_source_byok),
+                    ),
+                    sources.indexOf(CloudTtsGenerationSource.fromWire(viewModel.cloudTtsGenerationSource)),
+                    getString(R.string.cloud_tts_source),
+                    false,
+                    {},
+                ) { selected ->
+                    val source = sources.getOrNull(selected) ?: return@showDialog
+                    val provider = selectedCloudProvider()
+                    if (source == CloudTtsGenerationSource.Byok && !viewModel.hasCloudTtsApiKey(provider)) {
+                        showCloudApiKeyDialog(provider)
+                    } else {
+                        viewModel.selectCloudTtsGenerationSource(source)
+                        binding.readCloudTtsSource.setText(
+                            if (source == CloudTtsGenerationSource.Byok) {
+                                R.string.cloud_tts_source_byok
+                            } else {
+                                R.string.cloud_tts_source_backend
+                            }
+                        )
+                        binding.readCloudTtsApiKey.isVisible = source == CloudTtsGenerationSource.Byok
+                    }
+                }
+            }
+
+            binding.readCloudTtsApiKey.setOnClickListener {
+                showCloudApiKeyDialog(selectedCloudProvider())
             }
             updateCloudSettings()
 

@@ -7,7 +7,9 @@ import androidx.security.crypto.MasterKey
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.quicknovel.BuildConfig
 import com.lagradost.quicknovel.CLOUD_TTS_INSTALLATION_ID
+import com.lagradost.quicknovel.CLOUD_TTS_OPENROUTER_KEY
 import com.lagradost.quicknovel.CLOUD_TTS_REFRESH_CREDENTIAL
+import com.lagradost.quicknovel.CLOUD_TTS_SPEECHIFY_KEY
 import com.lagradost.quicknovel.DataStore
 import com.lagradost.quicknovel.DataStore.getKey
 import com.lagradost.quicknovel.DataStore.setKey
@@ -25,6 +27,7 @@ import kotlin.random.Random
 class CloudTtsRepository(
     context: Context,
     private val api: CloudTtsApi = CloudTtsApi(),
+    private val providerClient: CloudTtsProviderClient = CloudTtsProviderClient(),
 ) {
     private companion object {
         const val TAG = "CloudTTS"
@@ -63,13 +66,14 @@ class CloudTtsRepository(
         }
     }
 
-    suspend fun resolve(
-        modelId: String,
-        voiceId: String,
-        text: String,
-    ): ResolveResult = authenticated { token ->
-        Log.i(TAG, "Chunk resolve starting model=$modelId voice=$voiceId chars=${text.length}")
-        val request = ResolveChunkRequest(modelId, voiceId, text)
+    suspend fun resolve(selection: CloudTtsSelection, source: CloudTtsGenerationSource, text: String): ResolveResult =
+        authenticated { token ->
+        Log.i(
+            TAG,
+            "Chunk resolve starting provider=${selection.provider.wireValue} " +
+                "model=${selection.modelId} voice=${selection.voiceId} chars=${text.length}",
+        )
+        val request = selection.request(text, source)
         var result: ResolveResult = parseSuccess(
             api.post("/v1/tts/chunks:resolve", mapper.writeValueAsString(request), token)
         )
@@ -85,11 +89,41 @@ class CloudTtsRepository(
                 parseSuccess(api.get("/v1/tts/jobs/$jobId", refreshedToken))
             }
         }
+        if (result.state == "upload_required") return@authenticated result
         if (result.state != "ready" || result.audio == null) {
             throw CloudTtsException("generation_failed", "Cloud TTS audio was not available.")
         }
         Log.i(TAG, "Chunk ready cacheKey=${result.cacheKey.take(12)}")
         result
+    }
+
+    suspend fun generateByok(selection: CloudTtsSelection, text: String): ByteArray = withContext(Dispatchers.IO) {
+        val key = securePreferences.getString(providerKeyName(selection.provider), null)
+            ?: throw CloudTtsException(
+                "byok_key_required",
+                "Add a ${selection.provider.name} API key in Cloud TTS settings.",
+            )
+        providerClient.generate(selection, text, key)
+    }
+
+    suspend fun upload(request: ResolveChunkRequest, audio: ByteArray): ResolveResult = authenticated { token ->
+        parseSuccess(api.upload(
+            "/v1/tts/chunks/upload",
+            mapper.writeValueAsString(request.copy(generationSource = "byok")),
+            audio,
+            token,
+        ))
+    }
+
+    fun hasApiKey(provider: CloudTtsProvider): Boolean =
+        !securePreferences.getString(providerKeyName(provider), null).isNullOrBlank()
+
+    fun setApiKey(provider: CloudTtsProvider, value: String) {
+        securePreferences.edit().putString(providerKeyName(provider), value.trim()).apply()
+    }
+
+    fun clearApiKey(provider: CloudTtsProvider) {
+        securePreferences.edit().remove(providerKeyName(provider)).apply()
     }
 
     suspend fun download(url: String): ByteArray = networkCall {
@@ -114,7 +148,7 @@ class CloudTtsRepository(
             "Authentication starting flow=${if (refreshToken == null) "installation" else "refresh"} " +
                 "forceRefresh=$forceRefresh",
         )
-        val response = if (refreshToken == null) {
+        var response = if (refreshToken == null) {
             api.post(
                 "/v1/installations",
                 mapper.writeValueAsString(InstallationRequest(installationId, BuildConfig.VERSION_NAME)),
@@ -125,7 +159,18 @@ class CloudTtsRepository(
                 mapper.writeValueAsString(TokenRequest(installationId, refreshToken)),
             )
         }
-        val credentials: InstallationToken = parseSuccess(response)
+        var credentials = try {
+            parseSuccess<InstallationToken>(response)
+        } catch (error: CloudTtsException) {
+            if (refreshToken == null || error.code != "unauthorized") throw error
+            Log.w(TAG, "Refresh credential no longer exists; registering installation again")
+            securePreferences.edit().remove(CLOUD_TTS_REFRESH_CREDENTIAL).apply()
+            response = api.post(
+                "/v1/installations",
+                mapper.writeValueAsString(InstallationRequest(installationId, BuildConfig.VERSION_NAME)),
+            )
+            parseSuccess(response)
+        }
         credentials.refreshToken?.let {
             securePreferences.edit().putString(CLOUD_TTS_REFRESH_CREDENTIAL, it).apply()
         }
@@ -178,5 +223,10 @@ class CloudTtsRepository(
             apiError?.message ?: "Cloud TTS request failed. Please try again.",
             apiError?.retryable ?: (response.status >= 500),
         )
+    }
+
+    private fun providerKeyName(provider: CloudTtsProvider): String = when (provider) {
+        CloudTtsProvider.OpenRouter -> CLOUD_TTS_OPENROUTER_KEY
+        CloudTtsProvider.Speechify -> CLOUD_TTS_SPEECHIFY_KEY
     }
 }
