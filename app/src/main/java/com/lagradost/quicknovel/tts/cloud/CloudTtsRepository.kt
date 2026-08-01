@@ -97,6 +97,14 @@ class CloudTtsRepository(
         result
     }
 
+    suspend fun resolveChapter(request: ResolveChapterRequest): CinematicManifest = authenticated { token ->
+        parseSuccess(api.post("/v1/tts/chapters:resolve", mapper.writeValueAsString(request), token))
+    }
+
+    suspend fun pollChapter(jobId: String): CinematicManifest = authenticated { token ->
+        parseSuccess(api.get("/v1/tts/chapter-jobs/$jobId", token))
+    }
+
     suspend fun generateByok(selection: CloudTtsSelection, text: String): ByteArray = withContext(Dispatchers.IO) {
         val key = securePreferences.getString(providerKeyName(selection.provider), null)
             ?: throw CloudTtsException(

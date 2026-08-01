@@ -20,6 +20,7 @@ import com.lagradost.quicknovel.mvvm.debugAssert
 import com.lagradost.quicknovel.receivers.BecomingNoisyReceiver
 import com.lagradost.quicknovel.ui.UiText
 import com.lagradost.quicknovel.ui.txt
+import com.lagradost.quicknovel.tts.cloud.CinematicChapterContext
 import com.lagradost.quicknovel.util.UIHelper.requestAudioFocus
 import com.lagradost.quicknovel.util.UIHelper.unRequestAudioFocus
 import io.noties.markwon.Markwon
@@ -800,6 +801,7 @@ interface ReaderTtsEngine {
     fun resume()
     fun interrupt()
     fun release()
+    fun setChapter(context: CinematicChapterContext, playbackStartParagraphIndex: Int) = Unit
 
     suspend fun play(
         line: TTSHelper.TTSLine,

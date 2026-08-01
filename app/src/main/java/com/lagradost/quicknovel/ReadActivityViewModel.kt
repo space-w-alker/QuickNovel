@@ -81,6 +81,10 @@ import com.lagradost.quicknovel.tts.cloud.CloudVoice
 import com.lagradost.quicknovel.tts.cloud.CloudTtsGenerationSource
 import com.lagradost.quicknovel.tts.cloud.CloudTtsProvider
 import com.lagradost.quicknovel.tts.cloud.CloudTtsSelection
+import com.lagradost.quicknovel.tts.cloud.CinematicIdentity
+import com.lagradost.quicknovel.tts.cloud.CinematicTtsEngine
+import com.lagradost.quicknovel.tts.cloud.CinematicChapterContext
+import com.lagradost.quicknovel.tts.cloud.TTSParagraph
 import com.lagradost.safefile.closeQuietly
 import io.noties.markwon.AbstractMarkwonPlugin
 import io.noties.markwon.Markwon
@@ -185,6 +189,11 @@ abstract class AbstractBook {
     abstract fun getChapterTitle(index: Int): UiText
     abstract fun getLoadingStatus(index: Int): String?
 
+    open fun chapterSourceIdentity(index: Int, chapterTitle: String): String = listOf(
+        CinematicIdentity.normalizeNovelName(title()), index.toString(),
+        CinematicIdentity.normalizeNovelName(chapterTitle),
+    ).joinToString("\u0000")
+
     @Throws
     open fun loadImage(image: String): ByteArray? {
         return null
@@ -253,6 +262,9 @@ class QuickBook(val data: QuickStreamData) : AbstractBook() {
     override fun getLoadingStatus(index: Int): String {
         return data.data[index].url
     }
+
+    override fun chapterSourceIdentity(index: Int, chapterTitle: String): String =
+        "${data.meta.apiName}\u0000${data.data[index].url}"
 
     override suspend fun getChapterData(index: Int, reload: Boolean): String {
         val ctx = context ?: throw ErrorLoadingException("Invalid context")
@@ -364,6 +376,14 @@ class RegularBook(val data: EpubBook) : AbstractBook() {
     }
 
     override fun getLoadingStatus(index: Int): String? = null
+
+    override fun chapterSourceIdentity(index: Int, chapterTitle: String): String {
+        val resource = allTocReferences[index].resource
+        val identifier = runCatching {
+            resource.javaClass.getMethod("getId").invoke(resource) as? String
+        }.getOrNull()
+        return identifier?.takeIf { it.isNotBlank() } ?: resource.href
+    }
 
     override suspend fun getChapterData(index: Int, reload: Boolean): String {
         val start = allTocReferences[index].resource
@@ -1363,7 +1383,7 @@ class ReadActivityViewModel : ViewModel() {
     val cloudTtsCatalog: LiveData<CloudCatalog?> = _cloudTtsCatalog
 
     companion object {
-        const val CLOUD_TTS_CONSENT_VERSION = 2
+        const val CLOUD_TTS_CONSENT_VERSION = 3
     }
 
     private fun initTTSSession(context: Context) {
@@ -1415,6 +1435,14 @@ class ReadActivityViewModel : ViewModel() {
             ?: model.voices.firstOrNull()?.id.orEmpty()
     }
 
+    fun selectCloudChapterMode(modeId: String) {
+        stopTTS()
+        cloudTtsSelectionMode = "preset"
+        cloudTtsModelId = modeId
+        cloudTtsVoiceId = "auto"
+        cloudTtsGenerationSource = CloudTtsGenerationSource.Backend.wireValue
+    }
+
     fun selectCloudTtsVoice(voice: CloudVoice) {
         if (voice.id == cloudTtsVoiceId) return
         stopTTS()
@@ -1422,6 +1450,7 @@ class ReadActivityViewModel : ViewModel() {
     }
 
     private fun reconcileCloudTtsSelection(catalog: CloudCatalog) =
+        if (catalog.chapterModes.any { it.id == cloudTtsModelId }) null else
         catalog.resolveSelection(cloudTtsModelId, cloudTtsVoiceId)?.also { selection ->
             cloudTtsModelId = selection.presetModel!!.id
             cloudTtsVoiceId = selection.presetVoice!!.id
@@ -1463,6 +1492,18 @@ class ReadActivityViewModel : ViewModel() {
         }
         val repository = requireCloudTtsRepository()
         val catalog = repository.catalog().also { _cloudTtsCatalog.postValue(it) }
+        if (cloudTtsSelectionMode == "preset" && cloudTtsModelId == "cinematic") {
+            val mode = catalog.chapterModes.firstOrNull { it.id == "cinematic" && it.available }
+                ?: throw CloudTtsException("cinematic_unavailable", "Cinematic voice acting is unavailable for this installation.")
+            if (mode.locale != "en") throw CloudTtsException("unsupported_cinematic_language", "Cinematic mode currently supports English only.")
+            return CinematicTtsEngine(
+                context ?: throw IllegalStateException("Application context is unavailable"), repository,
+                onPreparing = { if (currentTTSStatus != TTSHelper.TTSStatus.IsStopped && currentTTSStatus != TTSHelper.TTSStatus.IsPaused) currentTTSStatus = TTSHelper.TTSStatus.Preparing },
+                onPlaying = { if (currentTTSStatus == TTSHelper.TTSStatus.Preparing) currentTTSStatus = TTSHelper.TTSStatus.IsRunning },
+                onUtterance = { utterance -> _ttsLine.postValue(utterance) },
+                prefetchNext = { chapterIndex -> cinematicChapterContext(chapterIndex + 1) },
+            )
+        }
         val selection = if (cloudTtsSelectionMode == "custom") {
             val provider = CloudTtsProvider.fromWire(cloudTtsProviderId)
             if (cloudTtsCustomModel.isBlank() || cloudTtsCustomVoice.isBlank()) {
@@ -1490,6 +1531,29 @@ class ReadActivityViewModel : ViewModel() {
                 if (currentTTSStatus == TTSHelper.TTSStatus.Preparing) {
                     currentTTSStatus = TTSHelper.TTSStatus.IsRunning
                 }
+            },
+        )
+    }
+
+    private suspend fun cinematicChapterContext(index: Int): CinematicChapterContext? {
+        if (index !in 0 until book.size()) return null
+        loadIndividualChapter(index, notify = false)
+        val chapter = when (val resource = chapterMutex.withLock { chapterData[index] }) {
+            is Resource.Success -> resource.value
+            else -> return null
+        }
+        val rendered = chapter.rendered.toString()
+        val chapterTitle = book.getChapterTitle(index).asStringNull(context) ?: "Chapter ${index + 1}"
+        return CinematicChapterContext(
+            novelName = book.title(),
+            chapterKey = CinematicIdentity.chapterKey(book.chapterSourceIdentity(index, chapterTitle)),
+            chapterTitle = chapterTitle,
+            chapterIndex = index,
+            paragraphs = chapter.cloudTtsParagraphs.mapIndexed { paragraphIndex, paragraph ->
+                val exact = if (paragraph.startChar >= 0 && paragraph.endChar <= rendered.length) {
+                    rendered.substring(paragraph.startChar, paragraph.endChar)
+                } else paragraph.speakOutMsg
+                TTSParagraph(paragraphIndex, exact, paragraph.startChar, paragraph.endChar)
             },
         )
     }
@@ -1602,7 +1666,7 @@ class ReadActivityViewModel : ViewModel() {
         playbackEngine = engine
         Log.i("CloudTTS", "Playback engine ready type=${engine.javaClass.simpleName}")
         if (currentTTSStatus == TTSHelper.TTSStatus.IsPaused) engine.pause()
-        else if (engine is CloudTtsEngine) currentTTSStatus = TTSHelper.TTSStatus.Preparing
+        else if (engine is CloudTtsEngine || engine is CinematicTtsEngine) currentTTSStatus = TTSHelper.TTSStatus.Preparing
         try {
             val ttsStartTime = System.currentTimeMillis()
             var ttsEndTime = ttsStartTime + ttsTimer
@@ -1613,7 +1677,7 @@ class ReadActivityViewModel : ViewModel() {
             if (ttsThreadMutex.isLocked) return@coroutineScope
             ttsThreadMutex.withLock {
                 engine.register()
-                if (engine is CloudTtsEngine) ttsSession?.register()
+                if (engine is CloudTtsEngine || engine is CinematicTtsEngine) ttsSession?.register()
                 engine.setSpeed(ttsSpeed)
                 if (engine is DeviceTtsEngine) engine.setPitch(ttsPitch)
 
@@ -1683,6 +1747,30 @@ class ReadActivityViewModel : ViewModel() {
                     // a negative innerIndex, this makes the wrapping good
                     if (ttsInnerIndex < 0) {
                         ttsInnerIndex += lines.size
+                    }
+
+                    if (engine is CinematicTtsEngine) {
+                        val chapterTitle = book.getChapterTitle(index).asStringNull(context) ?: "Chapter ${index + 1}"
+                        val sourceIdentity = book.chapterSourceIdentity(index, chapterTitle)
+                        val renderedChapter = when (val rendered = chapterMutex.withLock { chapterData[index] }) {
+                            is Resource.Success -> rendered.value.rendered.toString()
+                            else -> ""
+                        }
+                        engine.setChapter(
+                            CinematicChapterContext(
+                                novelName = book.title(),
+                                chapterKey = CinematicIdentity.chapterKey(sourceIdentity),
+                                chapterTitle = chapterTitle,
+                                chapterIndex = index,
+                                paragraphs = lines.mapIndexed { paragraphIndex, paragraph ->
+                                    val exactText = if (paragraph.startChar >= 0 && paragraph.endChar <= renderedChapter.length) {
+                                        renderedChapter.substring(paragraph.startChar, paragraph.endChar)
+                                    } else paragraph.speakOutMsg
+                                    TTSParagraph(paragraphIndex, exactText, paragraph.startChar, paragraph.endChar)
+                                },
+                            ),
+                            ttsInnerIndex.coerceIn(0, (lines.size - 1).coerceAtLeast(0)),
+                        )
                     }
 
                     updateIndex(index)
@@ -1823,8 +1911,8 @@ class ReadActivityViewModel : ViewModel() {
             )
             engine.interrupt()
             engine.unregister()
-            if (engine is CloudTtsEngine) ttsSession?.unregister()
-            if (engine is CloudTtsEngine) engine.release()
+            if (engine is CloudTtsEngine || engine is CinematicTtsEngine) ttsSession?.unregister()
+            if (engine is CloudTtsEngine || engine is CinematicTtsEngine) engine.release()
             _ttsLine.postValue(null)
             ttsTimeRemaining.postValue(null)
         }

@@ -327,8 +327,9 @@
     <string name="cloud_tts_save_key">Save key</string>
     <string name="cloud_tts_clear_key">Clear key</string>
     <string name="cloud_tts_consent_title">Use Cloud TTS?</string>
-    <string name="cloud_tts_consent_message">Chapter text is sent to QuickNovel or directly to your selected TTS provider. Provider keys stay encrypted on this device. Generated audio is uploaded to QuickNovel, retained permanently, and shared across installations using the same synthesis settings.</string>
+    <string name="cloud_tts_consent_message">Chapter text may be sent to QuickNovel, OpenRouter for complete-chapter speaker analysis and online character research, and Speechify for voice generation. Novel identity, chapter text, character profiles, research citations, derived scripts, request history, and generated audio are retained on the server indefinitely until an administrator deletes them. Globally reusable audio may remain after a chapter script is deleted. Provider keys stay encrypted on this device.</string>
     <string name="cloud_tts_agree">Agree and use Cloud TTS</string>
     <string name="cloud_tts_error_title">Cloud TTS stopped</string>
     <string name="cloud_tts_use_device">Use Device TTS</string>
+    <string name="cloud_tts_retry">Retry Cinematic</string>
 </resources>
