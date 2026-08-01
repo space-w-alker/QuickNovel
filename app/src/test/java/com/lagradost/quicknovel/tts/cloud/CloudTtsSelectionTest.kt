@@ -40,12 +40,23 @@ class CloudTtsSelectionTest {
 
     @Test
     fun emitsMutuallyExclusivePresetAndDirectRequests() {
+        val chapter = CinematicChapterContext(
+            novelName = "Example Novel",
+            chapterKey = "a".repeat(64),
+            chapterTitle = "Chapter 4",
+            chapterIndex = 3,
+            paragraphs = emptyList(),
+        )
         val preset = catalog.resolveSelection("high", "female")!!
-            .request("Hello", CloudTtsGenerationSource.Backend)
+            .request("Hello", CloudTtsGenerationSource.Backend, chapter)
         assertEquals("high", preset.quality)
         assertEquals("female", preset.gender)
         assertNull(preset.provider)
         assertEquals(2, preset.chunkerVersion)
+        assertEquals("Example Novel", preset.novelName)
+        assertEquals("Chapter 4", preset.chapterTitle)
+        assertEquals("a".repeat(64), preset.chapterKey)
+        assertEquals(3, preset.chapterIndex)
 
         val direct = CloudTtsSelection(
             CloudTtsProvider.Speechify,

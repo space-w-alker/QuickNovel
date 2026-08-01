@@ -66,14 +66,19 @@ class CloudTtsRepository(
         }
     }
 
-    suspend fun resolve(selection: CloudTtsSelection, source: CloudTtsGenerationSource, text: String): ResolveResult =
+    suspend fun resolve(
+        selection: CloudTtsSelection,
+        source: CloudTtsGenerationSource,
+        text: String,
+        chapter: CinematicChapterContext? = null,
+    ): ResolveResult =
         authenticated { token ->
         Log.i(
             TAG,
             "Chunk resolve starting provider=${selection.provider.wireValue} " +
                 "model=${selection.modelId} voice=${selection.voiceId} chars=${text.length}",
         )
-        val request = selection.request(text, source)
+        val request = selection.request(text, source, chapter)
         var result: ResolveResult = parseSuccess(
             api.post("/v1/tts/chunks:resolve", mapper.writeValueAsString(request), token)
         )

@@ -1749,7 +1749,7 @@ class ReadActivityViewModel : ViewModel() {
                         ttsInnerIndex += lines.size
                     }
 
-                    if (engine is CinematicTtsEngine) {
+                    if (engine is CloudTtsEngine || engine is CinematicTtsEngine) {
                         val chapterTitle = book.getChapterTitle(index).asStringNull(context) ?: "Chapter ${index + 1}"
                         val sourceIdentity = book.chapterSourceIdentity(index, chapterTitle)
                         val renderedChapter = when (val rendered = chapterMutex.withLock { chapterData[index] }) {

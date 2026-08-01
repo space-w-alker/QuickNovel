@@ -183,13 +183,21 @@ data class CloudTtsSelection(
 ) {
     val isPreset: Boolean get() = presetModel != null && presetVoice != null
 
-    fun request(text: String, source: CloudTtsGenerationSource): ResolveChunkRequest =
+    fun request(
+        text: String,
+        source: CloudTtsGenerationSource,
+        chapter: CinematicChapterContext? = null,
+    ): ResolveChunkRequest =
         if (isPreset) {
             ResolveChunkRequest(
                 quality = presetModel!!.id,
                 gender = presetVoice!!.id,
                 generationSource = source.wireValue,
                 text = text,
+                novelName = chapter?.novelName,
+                chapterTitle = chapter?.chapterTitle,
+                chapterKey = chapter?.chapterKey,
+                chapterIndex = chapter?.chapterIndex,
             )
         } else {
             ResolveChunkRequest(
@@ -198,12 +206,20 @@ data class CloudTtsSelection(
                 voice = voiceId,
                 generationSource = source.wireValue,
                 text = text,
+                novelName = chapter?.novelName,
+                chapterTitle = chapter?.chapterTitle,
+                chapterKey = chapter?.chapterKey,
+                chapterIndex = chapter?.chapterIndex,
             )
         }
 }
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 data class ResolveChunkRequest(
+    @JsonProperty("novel_name") val novelName: String? = null,
+    @JsonProperty("chapter_title") val chapterTitle: String? = null,
+    @JsonProperty("chapter_key") val chapterKey: String? = null,
+    @JsonProperty("chapter_index") val chapterIndex: Int? = null,
     val quality: String? = null,
     val gender: String? = null,
     val provider: String? = null,
