@@ -708,6 +708,7 @@ class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
             .setTitle(R.string.cloud_tts_error_title)
             .setMessage(message)
             .setPositiveButton(R.string.cloud_tts_use_device) { _, _ -> viewModel.useDeviceTts() }
+            .setNeutralButton(R.string.cloud_tts_retry) { _, _ -> viewModel.startTTS() }
             .setNegativeButton(R.string.cancel, null)
             .show()
     }
@@ -1253,11 +1254,16 @@ class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
                             binding.readCloudTtsVoice.text = viewModel.cloudTtsCustomVoice
                         } else {
                             val model = catalog.models.firstOrNull { it.id == viewModel.cloudTtsModelId }
-                            binding.readCloudTtsModel.text = model?.displayName
+                            val chapterMode = catalog.chapterModes.firstOrNull { it.id == viewModel.cloudTtsModelId }
+                            binding.readCloudTtsModel.text = model?.displayName ?: chapterMode?.displayName
                                 ?: getString(R.string.cloud_tts_model_loading)
-                            binding.readCloudTtsVoice.text = model?.voices
+                            binding.readCloudTtsVoice.text = if (chapterMode != null) "Auto" else model?.voices
                                 ?.firstOrNull { it.id == viewModel.cloudTtsVoiceId }?.displayName
                                 ?: getString(R.string.cloud_tts_voice)
+                            val cinematic = chapterMode != null
+                            binding.readCloudTtsVoice.isVisible = !cinematic
+                            binding.readCloudTtsSource.isVisible = !cinematic
+                            binding.readCloudTtsApiKey.isVisible = !cinematic && viewModel.cloudTtsGenerationSource == "byok"
                         }
                         binding.readCloudTtsModel.isEnabled = true
                     }
@@ -1294,6 +1300,7 @@ class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
             }
 
             binding.readCloudTtsVoice.setOnClickListener {
+                if (viewModel.cloudTtsModelId == "cinematic") return@setOnClickListener
                 if (viewModel.cloudTtsSelectionMode == "custom") {
                     showCustomCloudSelection(CloudTtsProvider.fromWire(viewModel.cloudTtsProviderId))
                     return@setOnClickListener
@@ -1318,16 +1325,18 @@ class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
 
             binding.readCloudTtsModel.setOnClickListener {
                 viewModel.loadCloudTtsCatalog { catalog ->
-                    val choices = catalog.models.map { it.displayName } + getString(R.string.cloud_tts_custom)
+                    val qualityChoices = catalog.qualityChoices
+                    val choices = qualityChoices.map { if (it.available) it.displayName else "${it.displayName} (Unavailable)" } +
+                        getString(R.string.cloud_tts_custom)
                     this.showDialog(
                         choices,
-                        if (viewModel.cloudTtsSelectionMode == "custom") catalog.models.size
-                        else catalog.models.indexOfFirst { it.id == viewModel.cloudTtsModelId },
+                        if (viewModel.cloudTtsSelectionMode == "custom") qualityChoices.size
+                        else qualityChoices.indexOfFirst { it.id == viewModel.cloudTtsModelId },
                         getString(R.string.cloud_tts_quality),
                         false,
                         {},
                     ) { selected ->
-                        if (selected == catalog.models.size) {
+                        if (selected == qualityChoices.size) {
                             this.showDialog(
                                 CloudTtsProvider.entries.map { it.name },
                                 CloudTtsProvider.entries.indexOf(
@@ -1341,12 +1350,19 @@ class ReadActivity2 : AppCompatActivity(), ColorPickerDialogListener {
                                     ?.let(::showCustomCloudSelection)
                             }
                         } else {
-                            catalog.models.getOrNull(selected)?.let { model ->
-                                viewModel.selectCloudTtsModel(model)
-                                binding.readCloudTtsModel.text = model.displayName
-                                binding.readCloudTtsVoice.text = model.voices
-                                    .firstOrNull { it.id == viewModel.cloudTtsVoiceId }?.displayName
+                            val choice = qualityChoices.getOrNull(selected) ?: return@showDialog
+                            if (!choice.available) return@showDialog
+                            catalog.models.firstOrNull { it.id == choice.id }?.let { model ->
+                                viewModel.selectCloudTtsModel(model); binding.readCloudTtsModel.text = model.displayName
+                                binding.readCloudTtsVoice.text = model.voices.firstOrNull { it.id == viewModel.cloudTtsVoiceId }?.displayName
                                     ?: getString(R.string.cloud_tts_voice)
+                            } ?: catalog.chapterModes.firstOrNull { it.id == choice.id }?.let { mode ->
+                                viewModel.selectCloudChapterMode(mode.id)
+                                binding.readCloudTtsModel.text = mode.displayName
+                                binding.readCloudTtsVoice.text = "Auto"
+                                binding.readCloudTtsVoice.isVisible = false
+                                binding.readCloudTtsSource.isVisible = false
+                                binding.readCloudTtsApiKey.isVisible = false
                             }
                         }
                     }

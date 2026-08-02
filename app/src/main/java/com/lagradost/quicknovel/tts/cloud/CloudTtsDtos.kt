@@ -79,7 +79,11 @@ data class CloudCatalog(
     @JsonProperty("catalog_version") val catalogVersion: String,
     val providers: List<CloudProviderCapability> = emptyList(),
     val models: List<CloudModel> = emptyList(),
+    @JsonProperty("chapter_modes") val chapterModes: List<CloudChapterMode> = emptyList(),
 ) {
+    val qualityChoices: List<CloudQualityChoice>
+        get() = models.map { CloudQualityChoice(it.id, it.displayName, true) } +
+            chapterModes.map { CloudQualityChoice(it.id, it.displayName, it.available) }
     fun resolveSelection(preferredModelId: String, preferredVoiceId: String): CloudTtsSelection? {
         val model = models.firstOrNull { it.id == preferredModelId }
             ?: models.firstOrNull { it.id == "standard" }
@@ -100,6 +104,75 @@ data class CloudCatalog(
     }
 }
 
+data class CloudQualityChoice(val id: String, val displayName: String, val available: Boolean)
+
+data class CloudChapterMode(
+    val id: String,
+    @JsonProperty("display_name") val displayName: String,
+    val available: Boolean = false,
+    val locale: String = "en",
+    @JsonProperty("chapter_scoped") val chapterScoped: Boolean = true,
+)
+
+data class CinematicChapterContext(
+    val novelName: String,
+    val chapterKey: String,
+    val chapterTitle: String,
+    val chapterIndex: Int,
+    val paragraphs: List<TTSParagraph>,
+)
+
+data class TTSParagraph(val paragraphIndex: Int, val text: String, val startChar: Int, val endChar: Int)
+
+data class ResolveChapterRequest(
+    @JsonProperty("novel_name") val novelName: String,
+    @JsonProperty("chapter_key") val chapterKey: String,
+    @JsonProperty("chapter_title") val chapterTitle: String? = null,
+    val paragraphs: List<ChapterParagraphRequest>,
+    @JsonProperty("playback_start_paragraph_index") val playbackStartParagraphIndex: Int = 0,
+)
+
+data class ChapterParagraphRequest(
+    @JsonProperty("paragraph_index") val paragraphIndex: Int,
+    val text: String,
+    @JsonProperty("start_char") val startChar: Int,
+    @JsonProperty("end_char") val endChar: Int,
+)
+
+data class CinematicManifest(
+    @JsonProperty("chapter_job_id") val chapterJobId: String,
+    @JsonProperty("identity_hash") val identityHash: String? = null,
+    val state: String,
+    @JsonProperty("retry_after_ms") val retryAfterMs: Long? = null,
+    @JsonProperty("playback_start_paragraph_index") val playbackStartParagraphIndex: Int = 0,
+    @JsonProperty("playable_through_paragraph_index") val playableThroughParagraphIndex: Int? = null,
+    @JsonProperty("first_gap_paragraph_index") val firstGapParagraphIndex: Int? = null,
+    val paragraphs: List<CinematicParagraph> = emptyList(),
+    val error: CinematicManifestError? = null,
+)
+
+data class CinematicManifestError(val code: String, val message: String)
+data class CinematicParagraph(
+    @JsonProperty("paragraph_index") val paragraphIndex: Int,
+    val text: String,
+    @JsonProperty("start_char") val startChar: Int,
+    @JsonProperty("end_char") val endChar: Int,
+    val status: String,
+    val utterances: List<CinematicUtterance> = emptyList(),
+)
+data class CinematicUtterance(
+    @JsonProperty("start_char") val startChar: Int,
+    @JsonProperty("end_char") val endChar: Int,
+    @JsonProperty("cleaned_text") val cleanedText: String,
+    val chunks: List<CinematicChunk> = emptyList(),
+)
+data class CinematicChunk(
+    @JsonProperty("cache_key") val cacheKey: String,
+    val status: String,
+    val retryable: Boolean = false,
+    val audio: CloudAudio? = null,
+)
+
 data class CloudTtsSelection(
     val provider: CloudTtsProvider,
     val modelId: String,
@@ -110,13 +183,21 @@ data class CloudTtsSelection(
 ) {
     val isPreset: Boolean get() = presetModel != null && presetVoice != null
 
-    fun request(text: String, source: CloudTtsGenerationSource): ResolveChunkRequest =
+    fun request(
+        text: String,
+        source: CloudTtsGenerationSource,
+        chapter: CinematicChapterContext? = null,
+    ): ResolveChunkRequest =
         if (isPreset) {
             ResolveChunkRequest(
                 quality = presetModel!!.id,
                 gender = presetVoice!!.id,
                 generationSource = source.wireValue,
                 text = text,
+                novelName = chapter?.novelName,
+                chapterTitle = chapter?.chapterTitle,
+                chapterKey = chapter?.chapterKey,
+                chapterIndex = chapter?.chapterIndex,
             )
         } else {
             ResolveChunkRequest(
@@ -125,12 +206,20 @@ data class CloudTtsSelection(
                 voice = voiceId,
                 generationSource = source.wireValue,
                 text = text,
+                novelName = chapter?.novelName,
+                chapterTitle = chapter?.chapterTitle,
+                chapterKey = chapter?.chapterKey,
+                chapterIndex = chapter?.chapterIndex,
             )
         }
 }
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 data class ResolveChunkRequest(
+    @JsonProperty("novel_name") val novelName: String? = null,
+    @JsonProperty("chapter_title") val chapterTitle: String? = null,
+    @JsonProperty("chapter_key") val chapterKey: String? = null,
+    @JsonProperty("chapter_index") val chapterIndex: Int? = null,
     val quality: String? = null,
     val gender: String? = null,
     val provider: String? = null,

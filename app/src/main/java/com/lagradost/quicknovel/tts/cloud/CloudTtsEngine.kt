@@ -42,11 +42,16 @@ class CloudTtsEngine(
     @Volatile private var released = false
     @Volatile private var paused = false
     @Volatile private var playbackStarted = false
+    @Volatile private var chapter: CinematicChapterContext? = null
 
     override val isInitialized: Boolean get() = !released
     override fun register() = Unit
     override fun unregister() = Unit
     override fun setPitch(pitch: Float) = Unit
+
+    override fun setChapter(context: CinematicChapterContext, playbackStartParagraphIndex: Int) {
+        chapter = context
+    }
 
     override fun setSpeed(speed: Float) {
         this.speed = speed
@@ -88,15 +93,16 @@ class CloudTtsEngine(
         shouldCancel: () -> Boolean,
     ): TtsPlaybackResult {
         coroutineContext.ensureActive()
+        val chapterContext = chapter
         val chunks = CloudTtsChunker.split(line.speakOutMsg, selection.maxInputCharacters)
         val current = chunks.map { text ->
             val key = requestKey(text)
-            key to prepared.getOrPut(key) { prepareAudio(text) }
+            key to prepared.getOrPut(key) { prepareAudio(text, chapterContext) }
         }
         upcoming.asSequence()
             .flatMap { CloudTtsChunker.split(it.speakOutMsg, selection.maxInputCharacters).asSequence() }
             .take(5)
-            .forEach { text -> prepared.getOrPut(requestKey(text)) { prepareAudio(text) } }
+            .forEach { text -> prepared.getOrPut(requestKey(text)) { prepareAudio(text, chapterContext) } }
         if (current.any { !it.second.isCompleted }) onPreparing()
         val files = try {
             current.map { (key, deferred) ->
@@ -162,25 +168,28 @@ class CloudTtsEngine(
         }
     }
 
-    private fun prepareAudio(text: String) = scope.async {
+    private fun prepareAudio(text: String, chapterContext: CinematicChapterContext?) = scope.async {
         resolveSlots.withPermit {
-            var result = repository.resolve(selection, generationSource, text)
+            var result = repository.resolve(selection, generationSource, text, chapterContext)
             cache.get(result.cacheKey)?.let { return@withPermit it }
             if (result.state == "upload_required") {
                 val bytes = repository.generateByok(selection, text)
-                val uploaded = repository.upload(selection.request(text, CloudTtsGenerationSource.Byok), bytes)
+                val uploaded = repository.upload(
+                    selection.request(text, CloudTtsGenerationSource.Byok, chapterContext),
+                    bytes,
+                )
                 if (uploaded.state == "ready" && uploaded.cacheHit != true) {
                     return@withPermit cache.put(uploaded.cacheKey, bytes)
                 }
                 val winner = if (uploaded.state == "ready") uploaded
-                else repository.resolve(selection, generationSource, text)
+                else repository.resolve(selection, generationSource, text, chapterContext)
                 return@withPermit cache.put(winner.cacheKey, repository.download(winner.audio!!.url))
             }
             val bytes = try {
                 repository.download(result.audio!!.url)
             } catch (error: CloudTtsException) {
                 if (error.code != "signed_url_expired") throw error
-                result = repository.resolve(selection, generationSource, text)
+                result = repository.resolve(selection, generationSource, text, chapterContext)
                 repository.download(result.audio!!.url)
             }
             cache.put(result.cacheKey, bytes)
