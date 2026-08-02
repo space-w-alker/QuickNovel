@@ -7,14 +7,22 @@ import android.media.PlaybackParams
 import com.lagradost.quicknovel.ReaderTtsEngine
 import com.lagradost.quicknovel.TTSHelper
 import com.lagradost.quicknovel.TtsPlaybackResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
 
@@ -28,6 +36,7 @@ class CinematicTtsEngine(
 ) : ReaderTtsEngine {
     private val cache = CloudTtsDiskCache(context.applicationContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val downloads = CinematicDownloadQueue(scope, ::downloadChunk)
     private val lock = Any()
     @Volatile private var player: MediaPlayer? = null
     @Volatile private var speed = 1f
@@ -35,7 +44,8 @@ class CinematicTtsEngine(
     @Volatile private var released = false
     @Volatile private var chapter: CinematicChapterContext? = null
     @Volatile private var playbackStart = 0
-    private var manifest: CinematicManifest? = null
+    @Volatile private var manifest: CinematicManifest? = null
+    @Volatile private var lookaheadJob: Job? = null
     private val prefetchTracker = CinematicPrefetchTracker()
 
     override val isInitialized: Boolean get() = !released
@@ -46,12 +56,20 @@ class CinematicTtsEngine(
     override fun pause() { paused = true; synchronized(lock) { runCatching { player?.pause() } } }
     override fun resume() { paused = false; synchronized(lock) { runCatching { player?.start() } } }
     override fun setChapter(context: CinematicChapterContext, playbackStartParagraphIndex: Int) {
-        if (chapter?.chapterKey != context.chapterKey) manifest = null
+        if (chapter?.chapterKey != context.chapterKey) {
+            lookaheadJob?.cancel()
+            lookaheadJob = null
+            downloads.clear()
+            manifest = null
+        }
         chapter = context
         playbackStart = playbackStartParagraphIndex
     }
     override fun interrupt() {
         synchronized(lock) { runCatching { player?.stop() }; player?.release(); player = null }
+        lookaheadJob?.cancel()
+        lookaheadJob = null
+        downloads.clear()
     }
     override fun release() { released = true; interrupt(); scope.cancel() }
 
@@ -93,6 +111,12 @@ class CinematicTtsEngine(
         if (paragraph.utterances.flatMap { it.chunks }.none { it.status == "ready" }) {
             throw CloudTtsException("cinematic_gap", "Cinematic paragraph audio is incomplete.", retryable = true)
         }
+        val playbackChunks = paragraph.readyChunks()
+        val currentDownloads = playbackChunks.associateWith { chunk ->
+            downloads.prepare(current.chapterJobId, chunk)
+        }
+        if (currentDownloads.values.any { !it.isCompleted }) onPreparing()
+        startLookahead(context, current, upcoming)
         for (utterance in paragraph.utterances) {
             val valid = utterance.startChar >= 0 && utterance.endChar <= paragraph.text.length && utterance.endChar > utterance.startChar
             onUtterance(TTSHelper.TTSLine(
@@ -102,23 +126,69 @@ class CinematicTtsEngine(
                 context.chapterIndex,
             ))
             for (chunk in utterance.chunks.filter { it.status == "ready" }) {
-            var ready = chunk
-            val file = cache.get(ready.cacheKey) ?: run {
-                var audio = ready.audio ?: throw CloudTtsException("cinematic_gap", "Cinematic audio is incomplete.", true)
-                val bytes = try { repository.download(audio.url) } catch (error: CloudTtsException) {
-                    if (error.code != "signed_url_expired") throw error
-                    current = repository.pollChapter(current.chapterJobId).also { manifest = it }
-                    ready = current.paragraphs.first { it.paragraphIndex == paragraphIndex }.utterances
-                        .flatMap { it.chunks }.first { it.cacheKey == ready.cacheKey }
-                    audio = ready.audio ?: throw error
-                    repository.download(audio.url)
+                val file = try {
+                    downloads.await(chunk.cacheKey, currentDownloads.getValue(chunk))
+                } catch (cancelled: CancellationException) {
+                    if (shouldCancel()) return TtsPlaybackResult.Interrupted
+                    throw cancelled
                 }
-                cache.put(ready.cacheKey, bytes)
-            }
-            if (playFile(file, shouldCancel) == TtsPlaybackResult.Interrupted) return TtsPlaybackResult.Interrupted
+                if (playFile(file, shouldCancel) == TtsPlaybackResult.Interrupted) {
+                    return TtsPlaybackResult.Interrupted
+                }
             }
         }
         return TtsPlaybackResult.Completed
+    }
+
+    private fun startLookahead(
+        context: CinematicChapterContext,
+        initial: CinematicManifest,
+        upcoming: List<TTSHelper.TTSLine>,
+    ) {
+        val targetStarts = upcoming.mapTo(hashSetOf()) { it.startChar }
+        if (targetStarts.isEmpty()) return
+        lookaheadJob?.cancel()
+        lookaheadJob = scope.launch {
+            var latest = initial
+            while (true) {
+                val targetParagraphs = latest.paragraphs
+                    .filter { it.startChar in targetStarts }
+                val targetChunks = targetParagraphs.asSequence()
+                    .flatMap { paragraph -> paragraph.utterances.asSequence().flatMap { it.chunks.asSequence() } }
+                    .distinctBy { it.cacheKey }
+                    .toList()
+                val wanted = targetChunks.size.coerceAtMost(CINEMATIC_PREFETCH_CHUNKS)
+                val candidates = targetChunks.asSequence()
+                    .filter { it.status == "ready" }
+                    .take(CINEMATIC_PREFETCH_CHUNKS)
+                    .toList()
+                downloads.prefetch(latest.chapterJobId, candidates)
+                val targetFailed = targetParagraphs.any { it.status == "failed" } || targetChunks.any { it.status == "failed" }
+                if ((wanted > 0 && candidates.size >= wanted) || targetFailed || latest.state in setOf("failed", "ready")) break
+                delay((latest.retryAfterMs ?: 750L).coerceIn(100, 10_000))
+                latest = repository.pollChapter(latest.chapterJobId)
+                if (chapter?.chapterKey != context.chapterKey) break
+                manifest = latest
+            }
+        }
+    }
+
+    private suspend fun downloadChunk(jobId: String, initial: CinematicChunk): File {
+        cache.get(initial.cacheKey)?.let { return it }
+        var ready = initial
+        var audio = ready.audio ?: throw CloudTtsException("cinematic_gap", "Cinematic audio is incomplete.", true)
+        val bytes = try {
+            repository.download(audio.url)
+        } catch (error: CloudTtsException) {
+            if (error.code != "signed_url_expired") throw error
+            val refreshed = repository.pollChapter(jobId)
+            ready = refreshed.paragraphs.asSequence().flatMap { it.utterances.asSequence() }
+                .flatMap { it.chunks.asSequence() }.firstOrNull { it.cacheKey == ready.cacheKey }
+                ?: throw error
+            audio = ready.audio ?: throw error
+            repository.download(audio.url)
+        }
+        return cache.put(ready.cacheKey, bytes)
     }
 
     private suspend fun playFile(file: File, shouldCancel: () -> Boolean): TtsPlaybackResult {
@@ -154,6 +224,47 @@ class CinematicTtsEngine(
 
     private fun MediaPlayer.applySpeed(value: Float) {
         playbackParams = (playbackParams ?: PlaybackParams()).setSpeed(value.coerceIn(0.1f, 7f))
+    }
+}
+
+private const val CINEMATIC_PREFETCH_CHUNKS = 5
+
+private fun CinematicParagraph.readyChunks(): List<CinematicChunk> =
+    utterances.flatMap { it.chunks }.filter { it.status == "ready" }
+
+internal class CinematicDownloadQueue(
+    private val scope: CoroutineScope,
+    private val loader: suspend (String, CinematicChunk) -> File,
+    concurrency: Int = 3,
+) {
+    private val slots = Semaphore(concurrency)
+    private val prepared = ConcurrentHashMap<String, Deferred<File>>()
+
+    fun prepare(jobId: String, chunk: CinematicChunk): Deferred<File> {
+        prepared[chunk.cacheKey]?.let { return it }
+        val candidate = scope.async(start = CoroutineStart.LAZY) {
+            slots.withPermit { loader(jobId, chunk) }
+        }
+        val selected = prepared.putIfAbsent(chunk.cacheKey, candidate) ?: candidate.also { deferred ->
+            deferred.invokeOnCompletion { error ->
+                if (error != null) prepared.remove(chunk.cacheKey, deferred)
+            }
+            deferred.start()
+        }
+        if (selected !== candidate) candidate.cancel()
+        return selected
+    }
+
+    fun prefetch(jobId: String, chunks: List<CinematicChunk>) {
+        chunks.forEach { prepare(jobId, it) }
+    }
+
+    suspend fun await(cacheKey: String, deferred: Deferred<File>): File =
+        deferred.await().also { prepared.remove(cacheKey, deferred) }
+
+    fun clear() {
+        prepared.values.forEach { it.cancel() }
+        prepared.clear()
     }
 }
 
