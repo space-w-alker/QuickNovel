@@ -213,7 +213,7 @@ object TTSNotifications {
         )
 
         when (status) {
-            TTSHelper.TTSStatus.IsRunning -> {
+            TTSHelper.TTSStatus.IsRunning, TTSHelper.TTSStatus.Preparing -> {
                 builder.addAction(actionRewind)
                 builder.addAction(actionStop)
                 builder.addAction(actionPause)

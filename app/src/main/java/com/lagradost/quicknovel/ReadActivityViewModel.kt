@@ -46,6 +46,7 @@ import com.lagradost.quicknovel.CommonActivity.activity
 import com.lagradost.quicknovel.CommonActivity.showToast
 import com.lagradost.quicknovel.TTSHelper.parseTextToSpans
 import com.lagradost.quicknovel.TTSHelper.preParseHtml
+import com.lagradost.quicknovel.TTSHelper.ttsParseParagraphs
 import com.lagradost.quicknovel.TTSHelper.ttsParseText
 import com.lagradost.quicknovel.mvvm.Resource
 import com.lagradost.quicknovel.mvvm.letInner
@@ -70,6 +71,20 @@ import com.lagradost.quicknovel.util.CoilImagesPlugin.CoilStore
 import com.lagradost.quicknovel.util.Coroutines.ioSafe
 import com.lagradost.quicknovel.util.Coroutines.runOnMainThread
 import com.lagradost.quicknovel.util.GoogleTranslateOnline
+import com.lagradost.quicknovel.util.Event
+import com.lagradost.quicknovel.tts.cloud.CloudCatalog
+import com.lagradost.quicknovel.tts.cloud.CloudTtsEngine
+import com.lagradost.quicknovel.tts.cloud.CloudTtsException
+import com.lagradost.quicknovel.tts.cloud.CloudTtsRepository
+import com.lagradost.quicknovel.tts.cloud.CloudModel
+import com.lagradost.quicknovel.tts.cloud.CloudVoice
+import com.lagradost.quicknovel.tts.cloud.CloudTtsGenerationSource
+import com.lagradost.quicknovel.tts.cloud.CloudTtsProvider
+import com.lagradost.quicknovel.tts.cloud.CloudTtsSelection
+import com.lagradost.quicknovel.tts.cloud.CinematicIdentity
+import com.lagradost.quicknovel.tts.cloud.CinematicTtsEngine
+import com.lagradost.quicknovel.tts.cloud.CinematicChapterContext
+import com.lagradost.quicknovel.tts.cloud.TTSParagraph
 import com.lagradost.safefile.closeQuietly
 import io.noties.markwon.AbstractMarkwonPlugin
 import io.noties.markwon.Markwon
@@ -174,6 +189,11 @@ abstract class AbstractBook {
     abstract fun getChapterTitle(index: Int): UiText
     abstract fun getLoadingStatus(index: Int): String?
 
+    open fun chapterSourceIdentity(index: Int, chapterTitle: String): String = listOf(
+        CinematicIdentity.normalizeNovelName(title()), index.toString(),
+        CinematicIdentity.normalizeNovelName(chapterTitle),
+    ).joinToString("\u0000")
+
     @Throws
     open fun loadImage(image: String): ByteArray? {
         return null
@@ -242,6 +262,9 @@ class QuickBook(val data: QuickStreamData) : AbstractBook() {
     override fun getLoadingStatus(index: Int): String {
         return data.data[index].url
     }
+
+    override fun chapterSourceIdentity(index: Int, chapterTitle: String): String =
+        "${data.meta.apiName}\u0000${data.data[index].url}"
 
     override suspend fun getChapterData(index: Int, reload: Boolean): String {
         val ctx = context ?: throw ErrorLoadingException("Invalid context")
@@ -354,6 +377,14 @@ class RegularBook(val data: EpubBook) : AbstractBook() {
 
     override fun getLoadingStatus(index: Int): String? = null
 
+    override fun chapterSourceIdentity(index: Int, chapterTitle: String): String {
+        val resource = allTocReferences[index].resource
+        val identifier = runCatching {
+            resource.javaClass.getMethod("getId").invoke(resource) as? String
+        }.getOrNull()
+        return identifier?.takeIf { it.isNotBlank() } ?: resource.href
+    }
+
     override suspend fun getChapterData(index: Int, reload: Boolean): String {
         val start = allTocReferences[index].resource
         val startIdx = data.spine.getResourceIndex(start)
@@ -451,6 +482,10 @@ data class LiveChapterData(
     // tts lines are lazy because not everyone uses tts
     val ttsLines by lazy {
         ttsParseText(rendered.substring(0, rendered.length), index)
+    }
+
+    val cloudTtsParagraphs by lazy {
+        ttsParseParagraphs(rendered.substring(0, rendered.length), index)
     }
 }
 
@@ -1340,11 +1375,187 @@ class ReadActivityViewModel : ViewModel() {
     // ========================================  TTS STUFF ========================================
 
     var ttsSession: TTSSession? = null
+    private var playbackEngine: ReaderTtsEngine? = null
+    private lateinit var cloudTtsRepository: CloudTtsRepository
+    val cloudTtsError = Event<String>()
+    val cloudTtsConsentRequired = Event<Unit>()
+    private val _cloudTtsCatalog = MutableLiveData<CloudCatalog?>()
+    val cloudTtsCatalog: LiveData<CloudCatalog?> = _cloudTtsCatalog
+
+    companion object {
+        const val CLOUD_TTS_CONSENT_VERSION = 3
+    }
 
     private fun initTTSSession(context: Context) {
+        cloudTtsRepository = CloudTtsRepository(context.applicationContext)
         runOnMainThread {
             ttsSession = TTSSession(context, ::parseAction)
+            playbackEngine = DeviceTtsEngine(ttsSession!!)
         }
+    }
+
+    private fun requireCloudTtsRepository(): CloudTtsRepository {
+        if (!::cloudTtsRepository.isInitialized) {
+            val appContext = context ?: throw CloudTtsException(
+                "initialization_failed", "Cloud TTS is not ready yet. Please try again."
+            )
+            cloudTtsRepository = CloudTtsRepository(appContext)
+        }
+        return cloudTtsRepository
+    }
+
+    fun loadCloudTtsCatalog(onLoaded: ((CloudCatalog) -> Unit)? = null) = viewModelScope.launch(Dispatchers.IO) {
+        try {
+            val catalog = requireCloudTtsRepository().catalog()
+            _cloudTtsCatalog.postValue(catalog)
+            reconcileCloudTtsSelection(catalog)
+            onLoaded?.let { callback -> runOnMainThread { callback(catalog) } }
+        } catch (error: CloudTtsException) {
+            cloudTtsError(error.message)
+        }
+    }
+
+    fun grantCloudTtsConsent() {
+        cloudTtsConsentVersion = CLOUD_TTS_CONSENT_VERSION
+        ttsEngine = TtsEngine.Cloud
+        loadCloudTtsCatalog()
+    }
+
+    fun useDeviceTts() {
+        stopTTS()
+        ttsEngine = TtsEngine.Device
+    }
+
+    fun selectCloudTtsModel(model: CloudModel) {
+        if (model.id == cloudTtsModelId) return
+        stopTTS()
+        cloudTtsSelectionMode = "preset"
+        cloudTtsModelId = model.id
+        cloudTtsVoiceId = model.voices.firstOrNull { it.id == cloudTtsVoiceId }?.id
+            ?: model.voices.firstOrNull()?.id.orEmpty()
+    }
+
+    fun selectCloudChapterMode(modeId: String) {
+        stopTTS()
+        cloudTtsSelectionMode = "preset"
+        cloudTtsModelId = modeId
+        cloudTtsVoiceId = "auto"
+        cloudTtsGenerationSource = CloudTtsGenerationSource.Backend.wireValue
+    }
+
+    fun selectCloudTtsVoice(voice: CloudVoice) {
+        if (voice.id == cloudTtsVoiceId) return
+        stopTTS()
+        cloudTtsVoiceId = voice.id
+    }
+
+    private fun reconcileCloudTtsSelection(catalog: CloudCatalog) =
+        if (catalog.chapterModes.any { it.id == cloudTtsModelId }) null else
+        catalog.resolveSelection(cloudTtsModelId, cloudTtsVoiceId)?.also { selection ->
+            cloudTtsModelId = selection.presetModel!!.id
+            cloudTtsVoiceId = selection.presetVoice!!.id
+        }
+
+    fun selectCloudTtsCustom(provider: CloudTtsProvider, model: String, voice: String) {
+        stopTTS()
+        cloudTtsSelectionMode = "custom"
+        cloudTtsProviderId = provider.wireValue
+        cloudTtsCustomModel = model.trim()
+        cloudTtsCustomVoice = voice.trim()
+    }
+
+    fun useCloudTtsPresets() {
+        if (cloudTtsSelectionMode != "preset") stopTTS()
+        cloudTtsSelectionMode = "preset"
+    }
+
+    fun selectCloudTtsGenerationSource(source: CloudTtsGenerationSource) {
+        if (cloudTtsGenerationSource != source.wireValue) stopTTS()
+        cloudTtsGenerationSource = source.wireValue
+    }
+
+    fun hasCloudTtsApiKey(provider: CloudTtsProvider): Boolean =
+        requireCloudTtsRepository().hasApiKey(provider)
+
+    fun setCloudTtsApiKey(provider: CloudTtsProvider, key: String) =
+        requireCloudTtsRepository().setApiKey(provider, key)
+
+    fun clearCloudTtsApiKey(provider: CloudTtsProvider) =
+        requireCloudTtsRepository().clearApiKey(provider)
+
+    private suspend fun createPlaybackEngine(): ReaderTtsEngine {
+        if (ttsEngine == TtsEngine.Device) {
+            return DeviceTtsEngine(ttsSession ?: throw IllegalStateException("Device TTS is unavailable"))
+        }
+        if (cloudTtsConsentVersion < CLOUD_TTS_CONSENT_VERSION) {
+            throw CloudTtsException("consent_required", "Cloud TTS consent is required before playback.")
+        }
+        val repository = requireCloudTtsRepository()
+        val catalog = repository.catalog().also { _cloudTtsCatalog.postValue(it) }
+        if (cloudTtsSelectionMode == "preset" && cloudTtsModelId == "cinematic") {
+            val mode = catalog.chapterModes.firstOrNull { it.id == "cinematic" && it.available }
+                ?: throw CloudTtsException("cinematic_unavailable", "Cinematic voice acting is unavailable for this installation.")
+            if (mode.locale != "en") throw CloudTtsException("unsupported_cinematic_language", "Cinematic mode currently supports English only.")
+            return CinematicTtsEngine(
+                context ?: throw IllegalStateException("Application context is unavailable"), repository,
+                onPreparing = { if (currentTTSStatus != TTSHelper.TTSStatus.IsStopped && currentTTSStatus != TTSHelper.TTSStatus.IsPaused) currentTTSStatus = TTSHelper.TTSStatus.Preparing },
+                onPlaying = { if (currentTTSStatus == TTSHelper.TTSStatus.Preparing) currentTTSStatus = TTSHelper.TTSStatus.IsRunning },
+                onUtterance = { utterance -> _ttsLine.postValue(utterance) },
+                prefetchNext = { chapterIndex -> cinematicChapterContext(chapterIndex + 1) },
+            )
+        }
+        val selection = if (cloudTtsSelectionMode == "custom") {
+            val provider = CloudTtsProvider.fromWire(cloudTtsProviderId)
+            if (cloudTtsCustomModel.isBlank() || cloudTtsCustomVoice.isBlank()) {
+                throw CloudTtsException("invalid_tts_selection", "Enter a custom model and voice.")
+            }
+            val maximum = catalog.providers.firstOrNull { it.id == provider.wireValue }
+                ?.maxInputCharacters ?: if (provider == CloudTtsProvider.Speechify) 2000 else 4000
+            CloudTtsSelection(provider, cloudTtsCustomModel, cloudTtsCustomVoice, maximum)
+        } else {
+            reconcileCloudTtsSelection(catalog) ?: throw CloudTtsException(
+                "catalog_entry_unavailable", "The selected Cloud TTS model is no longer available."
+            )
+        }
+        return CloudTtsEngine(
+            context ?: throw IllegalStateException("Application context is unavailable"),
+            repository,
+            selection,
+            CloudTtsGenerationSource.fromWire(cloudTtsGenerationSource),
+            onPreparing = {
+                if (currentTTSStatus != TTSHelper.TTSStatus.IsStopped &&
+                    currentTTSStatus != TTSHelper.TTSStatus.IsPaused
+                ) currentTTSStatus = TTSHelper.TTSStatus.Preparing
+            },
+            onPlaying = {
+                if (currentTTSStatus == TTSHelper.TTSStatus.Preparing) {
+                    currentTTSStatus = TTSHelper.TTSStatus.IsRunning
+                }
+            },
+        )
+    }
+
+    private suspend fun cinematicChapterContext(index: Int): CinematicChapterContext? {
+        if (index !in 0 until book.size()) return null
+        loadIndividualChapter(index, notify = false)
+        val chapter = when (val resource = chapterMutex.withLock { chapterData[index] }) {
+            is Resource.Success -> resource.value
+            else -> return null
+        }
+        val rendered = chapter.rendered.toString()
+        val chapterTitle = book.getChapterTitle(index).asStringNull(context) ?: "Chapter ${index + 1}"
+        return CinematicChapterContext(
+            novelName = book.title(),
+            chapterKey = CinematicIdentity.chapterKey(book.chapterSourceIdentity(index, chapterTitle)),
+            chapterTitle = chapterTitle,
+            chapterIndex = index,
+            paragraphs = chapter.cloudTtsParagraphs.mapIndexed { paragraphIndex, paragraph ->
+                val exact = if (paragraph.startChar >= 0 && paragraph.endChar <= rendered.length) {
+                    rendered.substring(paragraph.startChar, paragraph.endChar)
+                } else paragraph.speakOutMsg
+                TTSParagraph(paragraphIndex, exact, paragraph.startChar, paragraph.endChar)
+            },
+        )
     }
 
     private var pendingTTSSkip: Int = 0
@@ -1363,6 +1574,7 @@ class ReadActivityViewModel : ViewModel() {
 
     fun stopTTS() {
         currentTTSStatus = TTSHelper.TTSStatus.IsStopped
+        playbackEngine?.interrupt()
     }
 
     fun setTTSLanguage(locale: Locale?) {
@@ -1374,43 +1586,58 @@ class ReadActivityViewModel : ViewModel() {
     }
 
     fun pauseTTS() {
-        val ttsSession = ttsSession ?: return
-        if (!ttsSession.ttsInitialized()) return
-        if (currentTTSStatus == TTSHelper.TTSStatus.IsRunning) {
+        val engine = playbackEngine ?: return
+        if (!engine.isInitialized && currentTTSStatus != TTSHelper.TTSStatus.Preparing) return
+        if (currentTTSStatus == TTSHelper.TTSStatus.IsRunning || currentTTSStatus == TTSHelper.TTSStatus.Preparing) {
             currentTTSStatus = TTSHelper.TTSStatus.IsPaused
+            engine.pause()
         }
     }
 
     fun startTTS() {
+        Log.i(
+            "CloudTTS",
+            "Start button pressed engine=$ttsEngine status=$currentTTSStatus " +
+                "consentVersion=$cloudTtsConsentVersion model=$cloudTtsModelId voice=$cloudTtsVoiceId",
+        )
+        if (ttsEngine == TtsEngine.Cloud && cloudTtsConsentVersion < CLOUD_TTS_CONSENT_VERSION) {
+            cloudTtsConsentRequired(Unit)
+            return
+        }
+        playbackEngine?.resume()
         currentTTSStatus = TTSHelper.TTSStatus.IsRunning
     }
 
     fun forwardsTTS() {
-        val ttsSession = ttsSession ?: return
-        if (!ttsSession.ttsInitialized()) return
+        val engine = playbackEngine ?: return
+        if (!engine.isInitialized && currentTTSStatus != TTSHelper.TTSStatus.Preparing) return
         pendingTTSSkip += 1
+        engine.interrupt()
     }
 
     fun backwardsTTS() {
-        val ttsSession = ttsSession ?: return
-        if (!ttsSession.ttsInitialized()) return
+        val engine = playbackEngine ?: return
+        if (!engine.isInitialized && currentTTSStatus != TTSHelper.TTSStatus.Preparing) return
         pendingTTSSkip -= 1
+        engine.interrupt()
     }
 
     fun playTTS() {
-        currentTTSStatus = TTSHelper.TTSStatus.IsRunning
+        startTTS()
     }
 
     fun pausePlayTTS() {
-        if (currentTTSStatus == TTSHelper.TTSStatus.IsRunning) {
+        if (currentTTSStatus == TTSHelper.TTSStatus.IsRunning || currentTTSStatus == TTSHelper.TTSStatus.Preparing) {
             currentTTSStatus = TTSHelper.TTSStatus.IsPaused
+            playbackEngine?.pause()
         } else if (currentTTSStatus == TTSHelper.TTSStatus.IsPaused) {
+            playbackEngine?.resume()
             currentTTSStatus = TTSHelper.TTSStatus.IsRunning
         }
     }
 
     fun isTTSRunning(): Boolean {
-        return currentTTSStatus == TTSHelper.TTSStatus.IsRunning
+        return currentTTSStatus == TTSHelper.TTSStatus.IsRunning || currentTTSStatus == TTSHelper.TTSStatus.Preparing
     }
 
 
@@ -1421,7 +1648,25 @@ class ReadActivityViewModel : ViewModel() {
     }
 
     suspend fun startTTSThread() = coroutineScope {
-        val ttsSession = ttsSession ?: return@coroutineScope
+        val selectedCloud = ttsEngine == TtsEngine.Cloud
+        Log.i("CloudTTS", "TTS worker entered selectedCloud=$selectedCloud status=$currentTTSStatus")
+        if (selectedCloud) currentTTSStatus = TTSHelper.TTSStatus.Preparing
+        val engine = try {
+            createPlaybackEngine()
+        } catch (error: CloudTtsException) {
+            Log.e(
+                "CloudTTS",
+                "Playback engine creation failed code=${error.code} retryable=${error.retryable}",
+                error,
+            )
+            cloudTtsError(error.message)
+            currentTTSStatus = TTSHelper.TTSStatus.IsStopped
+            return@coroutineScope
+        }
+        playbackEngine = engine
+        Log.i("CloudTTS", "Playback engine ready type=${engine.javaClass.simpleName}")
+        if (currentTTSStatus == TTSHelper.TTSStatus.IsPaused) engine.pause()
+        else if (engine is CloudTtsEngine || engine is CinematicTtsEngine) currentTTSStatus = TTSHelper.TTSStatus.Preparing
         try {
             val ttsStartTime = System.currentTimeMillis()
             var ttsEndTime = ttsStartTime + ttsTimer
@@ -1431,9 +1676,10 @@ class ReadActivityViewModel : ViewModel() {
 
             if (ttsThreadMutex.isLocked) return@coroutineScope
             ttsThreadMutex.withLock {
-                ttsSession.register()
-                ttsSession.setSpeed(ttsSpeed)
-                ttsSession.setPitch(ttsPitch)
+                engine.register()
+                if (engine is CloudTtsEngine || engine is CinematicTtsEngine) ttsSession?.register()
+                engine.setSpeed(ttsSpeed)
+                if (engine is DeviceTtsEngine) engine.setPitch(ttsPitch)
 
                 var ttsInnerIndex = 0 // this inner index is different from what is set
                 var index = dIndex.index
@@ -1443,7 +1689,7 @@ class ReadActivityViewModel : ViewModel() {
 
                     val lines = chapterMutex.withLock {
                         chapterData[index].letInner {
-                            it.ttsLines
+                            if (selectedCloud) it.cloudTtsParagraphs else it.ttsLines
                         }
                     } ?: run {
                         // in case of error just go to the next chapter
@@ -1481,7 +1727,8 @@ class ReadActivityViewModel : ViewModel() {
                             }
 
                             is Resource.Success -> {
-                                currentData.value.ttsLines
+                                if (selectedCloud) currentData.value.cloudTtsParagraphs
+                                else currentData.value.ttsLines
                             }
                         }
 
@@ -1500,6 +1747,30 @@ class ReadActivityViewModel : ViewModel() {
                     // a negative innerIndex, this makes the wrapping good
                     if (ttsInnerIndex < 0) {
                         ttsInnerIndex += lines.size
+                    }
+
+                    if (engine is CloudTtsEngine || engine is CinematicTtsEngine) {
+                        val chapterTitle = book.getChapterTitle(index).asStringNull(context) ?: "Chapter ${index + 1}"
+                        val sourceIdentity = book.chapterSourceIdentity(index, chapterTitle)
+                        val renderedChapter = when (val rendered = chapterMutex.withLock { chapterData[index] }) {
+                            is Resource.Success -> rendered.value.rendered.toString()
+                            else -> ""
+                        }
+                        engine.setChapter(
+                            CinematicChapterContext(
+                                novelName = book.title(),
+                                chapterKey = CinematicIdentity.chapterKey(sourceIdentity),
+                                chapterTitle = chapterTitle,
+                                chapterIndex = index,
+                                paragraphs = lines.mapIndexed { paragraphIndex, paragraph ->
+                                    val exactText = if (paragraph.startChar >= 0 && paragraph.endChar <= renderedChapter.length) {
+                                        renderedChapter.substring(paragraph.startChar, paragraph.endChar)
+                                    } else paragraph.speakOutMsg
+                                    TTSParagraph(paragraphIndex, exactText, paragraph.startChar, paragraph.endChar)
+                                },
+                            ),
+                            ttsInnerIndex.coerceIn(0, (lines.size - 1).coerceAtLeast(0)),
+                        )
                     }
 
                     updateIndex(index)
@@ -1527,8 +1798,17 @@ class ReadActivityViewModel : ViewModel() {
 
                         if (currentTTSStatus == TTSHelper.TTSStatus.IsStopped) break
 
+                        if (pendingTTSSkip != 0) {
+                            ttsInnerIndex += pendingTTSSkip
+                            pendingTTSSkip = 0
+                            continue
+                        }
+
                         val line = lines[ttsInnerIndex]
-                        val nextLine = lines.getOrNull(ttsInnerIndex + 1)
+                        val upcoming = lines.subList(
+                            (ttsInnerIndex + 1).coerceAtMost(lines.size),
+                            (ttsInnerIndex + 6).coerceAtMost(lines.size),
+                        )
 
                         // set keys
                         /*setKey(
@@ -1558,21 +1838,15 @@ class ReadActivityViewModel : ViewModel() {
                         _ttsLine.postValue(line)
 
                         // wait for next line
-                        val waitFor = ttsSession.speak(
-                            line,
-                            nextLine
-                        ) {
-                            currentTTSStatus != TTSHelper.TTSStatus.IsRunning || pendingTTSSkip != 0
+                        engine.play(line, upcoming) {
+                            currentTTSStatus == TTSHelper.TTSStatus.IsStopped ||
+                                pendingTTSSkip != 0 ||
+                                (engine is DeviceTtsEngine &&
+                                    currentTTSStatus != TTSHelper.TTSStatus.IsRunning)
                         }
 
-                        if (!ttsSession.isValidTTS()) {
+                        if (!engine.isInitialized) {
                             currentTTSStatus = TTSHelper.TTSStatus.IsStopped
-                        }
-
-                        ttsSession.waitForOr(waitFor, {
-                            currentTTSStatus != TTSHelper.TTSStatus.IsRunning || pendingTTSSkip != 0
-                        }) {
-                            notify()
                         }
 
                         // wait for pause
@@ -1586,7 +1860,7 @@ class ReadActivityViewModel : ViewModel() {
                         ttsEndTime += 100L * isPauseDuration
 
                         // if we pause then we resume on the same line
-                        if (isPauseDuration > 0) {
+                        if (isPauseDuration > 0 && engine is DeviceTtsEngine) {
                             notify()
                             pendingTTSSkip = 0
                             continue
@@ -1616,6 +1890,14 @@ class ReadActivityViewModel : ViewModel() {
             }
         } catch (_: TimeoutCancellationException) {
 
+        } catch (error: CloudTtsException) {
+            Log.e(
+                "CloudTTS",
+                "Playback stopped by cloud error code=${error.code} retryable=${error.retryable}",
+                error,
+            )
+            logError(error)
+            cloudTtsError(error.message)
         } catch (t: Throwable) {
             logError(t)
         } finally {
@@ -1627,27 +1909,31 @@ class ReadActivityViewModel : ViewModel() {
                 TTSHelper.TTSStatus.IsStopped,
                 context
             )
-            ttsSession.interruptTTS()
-            ttsSession.unregister()
+            engine.interrupt()
+            engine.unregister()
+            if (engine is CloudTtsEngine || engine is CinematicTtsEngine) ttsSession?.unregister()
+            if (engine is CloudTtsEngine || engine is CinematicTtsEngine) engine.release()
             _ttsLine.postValue(null)
             ttsTimeRemaining.postValue(null)
         }
     }
 
     fun parseAction(input: TTSHelper.TTSActionType): Boolean {
-        val ttsSession = ttsSession ?: return false
+        val engine = playbackEngine ?: return false
 
         // validate that the action makes sense
         if (
             (currentTTSStatus == TTSHelper.TTSStatus.IsPaused && input == TTSHelper.TTSActionType.Pause) ||
             (currentTTSStatus != TTSHelper.TTSStatus.IsPaused && input == TTSHelper.TTSActionType.Resume) ||
             (currentTTSStatus == TTSHelper.TTSStatus.IsStopped && input == TTSHelper.TTSActionType.Stop) ||
-            (currentTTSStatus != TTSHelper.TTSStatus.IsRunning && input == TTSHelper.TTSActionType.Next)
+            (currentTTSStatus != TTSHelper.TTSStatus.IsRunning &&
+                currentTTSStatus != TTSHelper.TTSStatus.Preparing &&
+                input == TTSHelper.TTSActionType.Next)
         ) {
             return false
         }
 
-        if (!ttsSession.ttsInitialized()) return false
+        if (!engine.isInitialized && currentTTSStatus != TTSHelper.TTSStatus.Preparing) return false
 
         when (input) {
             TTSHelper.TTSActionType.Pause -> pauseTTS()
@@ -1769,7 +2055,9 @@ class ReadActivityViewModel : ViewModel() {
     override fun onCleared() {
         println("onCleared===${System.currentTimeMillis()}")
         lastChangeIndex?.let { setScrollKeys(it) }
-        ttsSession?.release()
+        playbackEngine?.release()
+        if (playbackEngine !is DeviceTtsEngine) ttsSession?.release()
+        playbackEngine = null
         ttsSession = null
         mlTranslator?.close()
         mlTranslator = null
@@ -1794,6 +2082,23 @@ class ReadActivityViewModel : ViewModel() {
     var scrollWithVolume by PreferenceDelegate(EPUB_SCROLL_VOL, true, Boolean::class)
     var authorNotes by PreferenceDelegate(EPUB_AUTHOR_NOTES, true, Boolean::class)
     var ttsLock by PreferenceDelegate(EPUB_TTS_LOCK, true, Boolean::class)
+    private var ttsEngineKey by PreferenceDelegate(EPUB_TTS_ENGINE, TtsEngine.Device.preferenceValue, String::class)
+    var ttsEngine: TtsEngine
+        get() = TtsEngine.fromPreference(ttsEngineKey)
+        set(value) {
+            if (value != ttsEngine) stopTTS()
+            ttsEngineKey = value.preferenceValue
+        }
+    var cloudTtsModelId by PreferenceDelegate(EPUB_CLOUD_TTS_MODEL, "", String::class)
+    var cloudTtsVoiceId by PreferenceDelegate(EPUB_CLOUD_TTS_VOICE, "", String::class)
+    var cloudTtsConsentVersion by PreferenceDelegate(EPUB_CLOUD_TTS_CONSENT_VERSION, 0, Int::class)
+    var cloudTtsSelectionMode by PreferenceDelegate(EPUB_CLOUD_TTS_SELECTION_MODE, "preset", String::class)
+    var cloudTtsProviderId by PreferenceDelegate(EPUB_CLOUD_TTS_PROVIDER, "openrouter", String::class)
+    var cloudTtsGenerationSource by PreferenceDelegate(
+        EPUB_CLOUD_TTS_GENERATION_SOURCE, "backend", String::class
+    )
+    var cloudTtsCustomModel by PreferenceDelegate(EPUB_CLOUD_TTS_CUSTOM_MODEL, "", String::class)
+    var cloudTtsCustomVoice by PreferenceDelegate(EPUB_CLOUD_TTS_CUSTOM_VOICE, "", String::class)
     //var ttsOSSpeed by PreferenceDelegate(EPUB_TTS_OS_SPEED, true, Boolean::class)
 
     private var ttsSpeedKey by PreferenceDelegate(EPUB_TTS_SET_SPEED, 1.0f, Float::class)
@@ -1802,14 +2107,14 @@ class ReadActivityViewModel : ViewModel() {
     var ttsSpeed: Float
         get() = ttsSpeedKey
         set(value) {
-            ttsSession?.setSpeed(value)
+            playbackEngine?.setSpeed(value)
             ttsSpeedKey = value
         }
 
     var ttsPitch: Float
         get() = ttsPitchKey
         set(value) {
-            ttsSession?.setPitch(value)
+            if (ttsEngine == TtsEngine.Device) playbackEngine?.setPitch(value)
             ttsPitchKey = value
         }
 

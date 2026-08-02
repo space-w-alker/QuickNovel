@@ -1,0 +1,93 @@
+name: Android validation
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  validate-wrapper:
+    name: Validate Gradle wrapper
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v6
+
+  validate-and-build:
+    name: Test, lint, and build
+    needs: validate-wrapper
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Packaging both variants can exhaust the project's 2 GiB local daemon limit.
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android API 37 preview SDK
+        run: |
+          sdkmanager --channel=3 "cmdline-tools;latest"
+          ANDROID_CLI=$(find "${ANDROID_SDK_ROOT}/cmdline-tools" -path "*/bin/android" -type f | sort | tail -1)
+          "${ANDROID_CLI}" update
+          "${ANDROID_CLI}" --sdk="${ANDROID_SDK_ROOT}" sdk install --canary \
+            platforms/android-37 build-tools/37.0.0 platform-tools
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          # Same-repository branches populate their scoped cache. Fork PRs stay read-only.
+          cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest --stacktrace
+
+      - name: Run Android lint and publish existing findings
+        continue-on-error: true
+        run: ./gradlew lintDebug --stacktrace
+
+      - name: Build debug and release APKs
+        run: ./gradlew assembleDebug assembleRelease --stacktrace
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v7
+        with:
+          name: QuickNovel-apks
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: QuickNovel-validation-reports
+          path: |
+            app/build/reports/tests/
+            app/build/reports/lint-results-*.html
+            app/build/reports/lint-results-*.xml
+          if-no-files-found: ignore
+          retention-days: 14

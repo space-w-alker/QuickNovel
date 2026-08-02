@@ -7,6 +7,9 @@ apply plugin: 'kotlin-kapt'
 
 apply(plugin: "org.jetbrains.kotlin.plugin.compose")
 
+def cloudTtsDebugBaseUrl = project.findProperty("CLOUD_TTS_DEBUG_BASE_URL") ?: "https://quicknovel-140-238-89-232.sslip.io"
+def cloudTtsReleaseBaseUrl = project.findProperty("CLOUD_TTS_RELEASE_BASE_URL") ?: "https://quicknovel-140-238-89-232.sslip.io"
+
 android {
     compileSdkVersion 37
     //buildToolsVersion "30.0.3"
@@ -33,10 +36,12 @@ android {
 
     buildTypes {
         release {
+            buildConfigField "String", "CLOUD_TTS_BASE_URL", "\"${cloudTtsReleaseBaseUrl}\""
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
         debug {
+            buildConfigField "String", "CLOUD_TTS_BASE_URL", "\"${cloudTtsDebugBaseUrl}\""
             buildConfigField("boolean", "BETA", "true")
             applicationIdSuffix ".debug"
             versionNameSuffix '-DEBUG'
@@ -89,6 +94,8 @@ dependencies {
     //noinspection NewerVersionAvailable
     implementation "com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1" // DO NOT CHANGE
     implementation "androidx.preference:preference-ktx:1.2.1"
+    implementation "androidx.security:security-crypto:1.1.0"
+    implementation "com.squareup.okhttp3:okhttp:4.12.0"
     implementation "me.xdrop:fuzzywuzzy:1.4.0"
 
     //implementation('com.positiondev.epublib:epublib-core:3.1') {

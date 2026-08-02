@@ -309,4 +309,27 @@
     <string name="more_spacing">More Spacing</string>
     <string name="less_spacing">Less Spacing</string>
     <string name="unable_to_inflate">UI was unable to be created correctly, this is a MAJOR BUG and should be reported immediately %s</string>
+    <string name="tts_engine">Speech engine</string>
+    <string name="tts_engine_device">Device TTS</string>
+    <string name="tts_engine_cloud">Cloud TTS</string>
+    <string name="cloud_tts_model_loading">Quality: loading…</string>
+    <string name="cloud_tts_quality">Quality</string>
+    <string name="cloud_tts_voice">Voice</string>
+    <string name="cloud_tts_custom">Custom</string>
+    <string name="cloud_tts_custom_model">Provider model ID</string>
+    <string name="cloud_tts_custom_voice">Provider voice ID</string>
+    <string name="cloud_tts_provider">Provider</string>
+    <string name="cloud_tts_source">Generation source</string>
+    <string name="cloud_tts_source_backend">QuickNovel server</string>
+    <string name="cloud_tts_source_byok">My provider API key</string>
+    <string name="cloud_tts_manage_key">Manage provider API key</string>
+    <string name="cloud_tts_api_key">API key</string>
+    <string name="cloud_tts_save_key">Save key</string>
+    <string name="cloud_tts_clear_key">Clear key</string>
+    <string name="cloud_tts_consent_title">Use Cloud TTS?</string>
+    <string name="cloud_tts_consent_message">Chapter text may be sent to QuickNovel, OpenRouter for complete-chapter speaker analysis and online character research, and Speechify for voice generation. Novel identity, chapter text, character profiles, research citations, derived scripts, request history, and generated audio are retained on the server indefinitely until an administrator deletes them. Globally reusable audio may remain after a chapter script is deleted. Provider keys stay encrypted on this device.</string>
+    <string name="cloud_tts_agree">Agree and use Cloud TTS</string>
+    <string name="cloud_tts_error_title">Cloud TTS stopped</string>
+    <string name="cloud_tts_use_device">Use Device TTS</string>
+    <string name="cloud_tts_retry">Retry Cinematic</string>
 </resources>
