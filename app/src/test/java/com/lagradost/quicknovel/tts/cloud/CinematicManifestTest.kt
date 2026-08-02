@@ -27,6 +27,21 @@ class CinematicManifestTest {
         assertFalse(manifest.state == "ready")
     }
 
+    @Test fun pollingStopsWhenTheBlockingGapHasFailed() {
+        assertTrue(manifest.shouldPollFor(1))
+        val failedGap = manifest.copy(
+            paragraphs = manifest.paragraphs + CinematicParagraph(
+                paragraphIndex = 1,
+                text = "Failed paragraph.",
+                startChar = 15,
+                endChar = 32,
+                status = "failed",
+            ),
+        )
+        assertFalse(failedGap.shouldPollFor(1))
+        assertFalse(failedGap.shouldPollFor(2))
+    }
+
     @Test fun nextOnlyPrefetchIsDeduplicatedByIdentityAndRevision() {
         val tracker = CinematicPrefetchTracker()
         assertTrue(tracker.shouldSubmit("chapter-2", "revision-1"))

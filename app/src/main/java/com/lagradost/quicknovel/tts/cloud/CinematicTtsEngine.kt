@@ -68,7 +68,7 @@ class CinematicTtsEngine(
         val paragraphIndex = context.paragraphs.indexOfFirst { it.startChar == line.startChar }.takeIf { it >= 0 }
             ?: throw CloudTtsException("cinematic_paragraph_missing", "Cinematic paragraph data changed.")
         var current = manifest ?: repository.resolveChapter(context.request(playbackStart)).also { manifest = it }
-        while ((current.playableThroughParagraphIndex ?: -1) < paragraphIndex && current.state !in setOf("failed", "ready")) {
+        while (current.shouldPollFor(paragraphIndex)) {
             onPreparing()
             delay((current.retryAfterMs ?: 750L).coerceIn(100, 10_000))
             if (shouldCancel()) return TtsPlaybackResult.Interrupted
@@ -124,11 +124,17 @@ class CinematicTtsEngine(
     private suspend fun playFile(file: File, shouldCancel: () -> Boolean): TtsPlaybackResult {
         if (shouldCancel()) return TtsPlaybackResult.Interrupted
         val completed = AtomicBoolean(false)
+        val playbackError = arrayOfNulls<Throwable>(1)
         val mediaPlayer = MediaPlayer().apply {
             setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
             setDataSource(file.absolutePath); setOnCompletionListener { completed.set(true) }
-            setOnErrorListener { _, _, _ -> completed.set(true); true }; prepare(); applySpeed(speed)
+            setOnErrorListener { _, what, extra ->
+                playbackError[0] = IllegalStateException("MP3 playback failed ($what/$extra)")
+                completed.set(true)
+                true
+            }
+            prepare(); applySpeed(speed)
         }
         synchronized(lock) { player = mediaPlayer }
         try {
@@ -136,6 +142,9 @@ class CinematicTtsEngine(
             if (shouldCancel()) return TtsPlaybackResult.Interrupted
             onPlaying(); mediaPlayer.start()
             while (!completed.get()) { if (shouldCancel()) return TtsPlaybackResult.Interrupted; delay(50) }
+            playbackError[0]?.let {
+                throw CloudTtsException("playback_failed", "Cinematic audio could not be played.", cause = it)
+            }
             return TtsPlaybackResult.Completed
         } finally {
             synchronized(lock) { if (player === mediaPlayer) player = null }
@@ -146,6 +155,17 @@ class CinematicTtsEngine(
     private fun MediaPlayer.applySpeed(value: Float) {
         playbackParams = (playbackParams ?: PlaybackParams()).setSpeed(value.coerceIn(0.1f, 7f))
     }
+}
+
+fun CinematicManifest.shouldPollFor(paragraphIndex: Int): Boolean {
+    if ((playableThroughParagraphIndex ?: -1) >= paragraphIndex || state in setOf("failed", "ready")) return false
+    val blockingIndex = firstGapParagraphIndex ?: paragraphs
+        .firstOrNull { it.paragraphIndex >= playbackStartParagraphIndex && it.status != "ready" }
+        ?.paragraphIndex
+    val blocking = paragraphs.firstOrNull { it.paragraphIndex == blockingIndex }
+    return blocking?.status != "failed" && blocking?.utterances
+        ?.flatMap { it.chunks }
+        ?.none { it.status == "failed" } != false
 }
 
 fun CinematicChapterContext.request(start: Int): ResolveChapterRequest = ResolveChapterRequest(
